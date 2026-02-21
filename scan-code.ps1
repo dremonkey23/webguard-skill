@@ -1,15 +1,3 @@
-<#
-.SYNOPSIS
-    WebGuard Code Scanner v1.0 — Local code security scanner
-.DESCRIPTION
-    Recursively scans a local folder for hardcoded secrets, dangerous functions,
-    SQL injection patterns, and dependency vulnerabilities.
-.PARAMETER Path
-    The folder path to scan (e.g. C:\Projects\myapp)
-.EXAMPLE
-    .\scan-code.ps1 -Path "C:\Projects\myapp"
-#>
-
 param(
     [Parameter(Mandatory=$true)]
     [string]$Path
@@ -20,231 +8,167 @@ if (-not (Test-Path $Path)) {
     exit 1
 }
 
-$Path = (Resolve-Path $Path).Path
-
-$findings_crit = [System.Collections.Generic.List[string]]::new()
-$findings_high = [System.Collections.Generic.List[string]]::new()
-$findings_med  = [System.Collections.Generic.List[string]]::new()
-$findings_low  = [System.Collections.Generic.List[string]]::new()
-$passed        = [System.Collections.Generic.List[string]]::new()
+$findings_critical = [System.Collections.Generic.List[string]]::new()
+$findings_high     = [System.Collections.Generic.List[string]]::new()
+$findings_medium   = [System.Collections.Generic.List[string]]::new()
+$findings_low      = [System.Collections.Generic.List[string]]::new()
+$passed            = [System.Collections.Generic.List[string]]::new()
 
 Write-Host ""
-Write-Host "🔍 WebGuard Code Report — $Path"
-Write-Host "━━━━━━━━━━━━━━━━━━━"
-Write-Host "  Scanning files..." -ForegroundColor DarkGray
+Write-Host "WebGuard Code Report -- $Path"
+Write-Host "-----------------------------------"
+Write-Host ""
 
-# ── File Extensions to Scan ───────────────────────────────────────────────────
-
-$scanExts = @('*.js','*.ts','*.py','*.php','*.rb','*.env','*.json','*.yaml','*.yml','*.toml','*.config','*.cfg','*.ini','*.sh','*.bash')
-
+# 1. Collect files
+$extensions = @("*.js","*.ts","*.py","*.php","*.rb","*.cs","*.java","*.go","*.rs")
 $allFiles = @()
-foreach ($ext in $scanExts) {
-    $allFiles += Get-ChildItem -Path $Path -Filter $ext -Recurse -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '\\(node_modules|\.git|vendor|dist|build)\\' }
+foreach ($ext in $extensions) {
+    $allFiles += Get-ChildItem -Path $Path -Recurse -Filter $ext -ErrorAction SilentlyContinue
 }
+Write-Host "Scanning $($allFiles.Count) source files..."
+Write-Host ""
 
-$totalFiles = $allFiles.Count
-Write-Host "  Found $totalFiles files to scan" -ForegroundColor DarkGray
-
-# ── 1. Hardcoded Secrets ──────────────────────────────────────────────────────
-
+# 2. Secret patterns
 $secretPatterns = @(
-    @{ name="OpenAI API key";         regex='sk-[A-Za-z0-9]{32,}' },
-    @{ name="AWS access key";         regex='AKIA[0-9A-Z]{16}' },
-    @{ name="GitHub PAT";             regex='ghp_[A-Za-z0-9]{36,}' },
-    @{ name="GitHub OAuth token";     regex='gho_[A-Za-z0-9]{36,}' },
-    @{ name="Hardcoded password";     regex='(?i)password\s*[=:]\s*[''"][^''"]{4,}' },
-    @{ name="Hardcoded API key";      regex='(?i)api_key\s*[=:]\s*[''"][^''"]{4,}' },
-    @{ name="Hardcoded secret";       regex='(?i)secret\s*[=:]\s*[''"][^''"]{4,}' },
-    @{ name="Hardcoded token";        regex='(?i)\btoken\s*[=:]\s*[''"][^''"]{8,}' },
-    @{ name="Bearer token in code";   regex='Bearer [A-Za-z0-9\-._~+\/]{20,}' },
-    @{ name="Stripe key";             regex='sk_live_[A-Za-z0-9]{24,}' },
-    @{ name="Slack token";            regex='xox[baprs]-[A-Za-z0-9\-]{10,}' }
+    @{ name="OpenAI API Key";    regex='sk-[A-Za-z0-9]{32,}';        level="CRITICAL" },
+    @{ name="AWS Access Key";    regex='AKIA[0-9A-Z]{16}';            level="CRITICAL" },
+    @{ name="GitHub Token";      regex='ghp_[A-Za-z0-9]{36}';        level="CRITICAL" },
+    @{ name="Stripe Secret Key"; regex='sk_live_[A-Za-z0-9]{24,}';   level="CRITICAL" },
+    @{ name="Generic API Key";   regex='api[_-]?key\s*[=:]\s*["\x27][A-Za-z0-9\-_]{16,}'; level="HIGH" },
+    @{ name="Hardcoded Password";regex='password\s*[=:]\s*["\x27][^"\x27\s]{6,}'; level="HIGH" },
+    @{ name="Bearer Token";      regex='Bearer\s+[A-Za-z0-9\-._~+/]+=*'; level="HIGH" },
+    @{ name="Private Key Block"; regex='-----BEGIN.*PRIVATE KEY-----'; level="CRITICAL" }
 )
 
-$secretHits = 0
+# 3. Dangerous function patterns
+$dangerPatterns = @(
+    @{ name="eval()";                  regex='\beval\s*\(';             level="HIGH" },
+    @{ name="innerHTML assignment";    regex='innerHTML\s*=';           level="MEDIUM" },
+    @{ name="dangerouslySetInnerHTML"; regex='dangerouslySetInnerHTML'; level="MEDIUM" },
+    @{ name="exec() shell call";       regex='\bexec\s*\(';             level="HIGH" },
+    @{ name="system() call";           regex='\bsystem\s*\(';           level="HIGH" },
+    @{ name="document.write()";        regex='document\.write\s*\(';   level="MEDIUM" },
+    @{ name="setTimeout(string)";      regex='setTimeout\s*\(\s*["\x27]'; level="LOW" }
+)
+
+# 4. SQL injection patterns
+$sqlPatterns = @(
+    @{ name="String concat in query"; regex='(query|sql|execute)\s*\+\s*["\x27\$]'; level="HIGH" },
+    @{ name="Format string in SQL";   regex='(query|sql)\s*%\s*\(';                 level="HIGH" },
+    @{ name="Raw SQL f-string";       regex='f["\x27]SELECT.*WHERE.*\{';            level="HIGH" }
+)
+
+$secretFound = $false
+$dangerFound = $false
+$sqlFound    = $false
+
 foreach ($file in $allFiles) {
+    $relPath = $file.FullName.Replace($Path, "").TrimStart("\\/")
     try {
         $content = Get-Content $file.FullName -ErrorAction Stop
+
         $lineNum = 0
         foreach ($line in $content) {
             $lineNum++
+
+            # Secrets
             foreach ($pat in $secretPatterns) {
                 if ($line -match $pat.regex) {
-                    $relPath = $file.FullName.Replace($Path, '').TrimStart('\','/')
-                    $findings_crit.Add("$($pat.name) found in $relPath (line $lineNum)")
-                    $secretHits++
-                    break  # one finding per line
+                    $secretFound = $true
+                    if ($pat.level -eq "CRITICAL") {
+                        $findings_critical.Add("$($pat.name) in $relPath (line $lineNum)")
+                    } else {
+                        $findings_high.Add("$($pat.name) in $relPath (line $lineNum)")
+                    }
                 }
             }
-        }
-    } catch { }
-}
 
-if ($secretHits -eq 0) { $passed.Add("No hardcoded secrets detected") }
-
-# ── 2. Dangerous Functions ────────────────────────────────────────────────────
-
-$dangerPatterns = @(
-    @{ name="eval()";                       regex='(?<!\w)eval\s*\(' },
-    @{ name="exec()";                       regex='(?<!\w)exec\s*\(' },
-    @{ name="system()";                     regex='(?<!\w)system\s*\(' },
-    @{ name="shell_exec()";                 regex='shell_exec\s*\(' },
-    @{ name="subprocess.call()";            regex='subprocess\.call\s*\(' },
-    @{ name="subprocess.Popen()";           regex='subprocess\.Popen\s*\(' },
-    @{ name="innerHTML assignment";         regex='innerHTML\s*=' },
-    @{ name="dangerouslySetInnerHTML";      regex='dangerouslySetInnerHTML' },
-    @{ name="document.write()";            regex='document\.write\s*\(' }
-)
-
-$dangerHits = 0
-foreach ($file in $allFiles) {
-    # Skip minified files (very long single lines)
-    if ($file.Name -match '\.min\.(js|css)$') { continue }
-    try {
-        $content = Get-Content $file.FullName -ErrorAction Stop
-        $lineNum = 0
-        foreach ($line in $content) {
-            $lineNum++
+            # Dangerous functions
             foreach ($pat in $dangerPatterns) {
                 if ($line -match $pat.regex) {
-                    $relPath = $file.FullName.Replace($Path, '').TrimStart('\','/')
-                    $findings_high.Add("$($pat.name) used in $relPath (line $lineNum)")
-                    $dangerHits++
+                    $dangerFound = $true
+                    if ($pat.level -eq "HIGH") {
+                        $findings_high.Add("$($pat.name) in $relPath (line $lineNum)")
+                    } elseif ($pat.level -eq "MEDIUM") {
+                        $findings_medium.Add("$($pat.name) in $relPath (line $lineNum)")
+                    } else {
+                        $findings_low.Add("$($pat.name) in $relPath (line $lineNum)")
+                    }
                 }
             }
-        }
-    } catch { }
-}
 
-if ($dangerHits -eq 0) { $passed.Add("No dangerous function patterns detected") }
-
-# ── 3. SQL Injection Patterns ─────────────────────────────────────────────────
-
-$sqlPatterns = @(
-    @{ name="String concat in SQL";   regex='(?i)(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE).{0,60}["'']\s*\+' },
-    @{ name="f-string SQL query";     regex='(?i)f["''](SELECT|INSERT|UPDATE|DELETE)' },
-    @{ name="execute() with concat";  regex='(?i)\.execute\s*\(\s*[^,)]*\+' },
-    @{ name="format() in SQL";        regex='(?i)(SELECT|INSERT|UPDATE|DELETE).{0,40}\.format\s*\(' }
-)
-
-$sqlHits = 0
-foreach ($file in $allFiles) {
-    if ($file.Extension -notin @('.py','.php','.rb','.js','.ts')) { continue }
-    try {
-        $content = Get-Content $file.FullName -ErrorAction Stop
-        $lineNum = 0
-        foreach ($line in $content) {
-            $lineNum++
+            # SQL injection
             foreach ($pat in $sqlPatterns) {
                 if ($line -match $pat.regex) {
-                    $relPath = $file.FullName.Replace($Path, '').TrimStart('\','/')
-                    $findings_high.Add("$($pat.name) in $relPath (line $lineNum) — possible SQL injection")
-                    $sqlHits++
+                    $sqlFound = $true
+                    $findings_high.Add("$($pat.name) in $relPath (line $lineNum) - possible SQL injection")
                 }
             }
         }
     } catch { }
 }
 
-if ($sqlHits -eq 0) { $passed.Add("No obvious SQL injection patterns detected") }
+if (-not $secretFound) { $passed.Add("No hardcoded secrets detected") }
+if (-not $dangerFound) { $passed.Add("No dangerous functions detected") }
+if (-not $sqlFound)    { $passed.Add("No SQL injection patterns detected") }
 
-# ── 4. Dependency Audits ──────────────────────────────────────────────────────
+# 5. Dependency audit
+$pkgJson = Join-Path $Path "package.json"
+$reqTxt  = Join-Path $Path "requirements.txt"
 
-# npm audit
-$pkgJson = Get-ChildItem -Path $Path -Filter "package.json" -Recurse -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '\\node_modules\\' } | Select-Object -First 1
-
-if ($pkgJson) {
-    Write-Host "  Running npm audit..." -ForegroundColor DarkGray
-    $npmDir = $pkgJson.DirectoryName
-    try {
-        $npmOut = & npm audit --json 2>$null | ConvertFrom-Json -ErrorAction Stop
-        $vulns  = $npmOut.metadata.vulnerabilities
-        if ($vulns) {
-            if ($vulns.critical -gt 0) { $findings_crit.Add("npm audit: $($vulns.critical) CRITICAL vulnerabilities found — run 'npm audit fix'") }
-            if ($vulns.high    -gt 0) { $findings_high.Add("npm audit: $($vulns.high) HIGH vulnerabilities found — run 'npm audit fix'") }
-            if ($vulns.moderate -gt 0) { $findings_med.Add("npm audit: $($vulns.moderate) MODERATE vulnerabilities found") }
-            if ($vulns.low     -gt 0) { $findings_low.Add("npm audit: $($vulns.low) LOW vulnerabilities found") }
-            if ($vulns.critical -eq 0 -and $vulns.high -eq 0) { $passed.Add("npm audit: no critical/high vulnerabilities") }
-        }
-    } catch {
-        $findings_low.Add("npm audit could not run (npm not installed or node_modules missing)")
-    }
-} 
-
-# pip audit
-$reqTxt = Get-ChildItem -Path $Path -Filter "requirements.txt" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-
-if ($reqTxt) {
-    Write-Host "  Running pip audit..." -ForegroundColor DarkGray
-    try {
-        $pipOut = & pip audit --requirement $reqTxt.FullName --format json 2>$null | ConvertFrom-Json -ErrorAction Stop
-        if ($pipOut.Count -gt 0) {
-            $critical = $pipOut | Where-Object { $_.vulns.Count -gt 0 }
-            if ($critical.Count -gt 0) {
-                foreach ($pkg in $critical) {
-                    $cveList = ($pkg.vulns | Select-Object -First 2 | ForEach-Object { $_.id }) -join ", "
-                    $findings_high.Add("pip audit: $($pkg.name) $($pkg.version) has known vulnerabilities ($cveList)")
-                }
-            } else {
-                $passed.Add("pip audit: no vulnerabilities found")
+if (Test-Path $pkgJson) {
+    Write-Host "Running npm audit..."
+    $npmOut = npm audit --json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
+    if ($npmOut -and $npmOut.metadata) {
+        $vulns = $npmOut.metadata.vulnerabilities
+        $total = $vulns.critical + $vulns.high + $vulns.moderate + $vulns.low
+        if ($total -gt 0) {
+            if ($vulns.critical -gt 0) {
+                $findings_critical.Add("npm audit: $($vulns.critical) CRITICAL vulnerabilities - run 'npm audit fix'")
+            }
+            if ($vulns.high -gt 0) {
+                $findings_high.Add("npm audit: $($vulns.high) HIGH vulnerabilities")
             }
         } else {
+            $passed.Add("npm audit: no vulnerabilities found")
+        }
+    }
+}
+
+if (Test-Path $reqTxt) {
+    if (Get-Command pip -ErrorAction SilentlyContinue) {
+        Write-Host "Running pip audit..."
+        $pipOut = pip audit 2>&1
+        if ($pipOut -match "No known vulnerabilities") {
             $passed.Add("pip audit: no vulnerabilities found")
+        } else {
+            $findings_medium.Add("pip audit found issues - run 'pip audit' for details")
         }
-    } catch {
-        $findings_low.Add("pip audit could not run (install with: pip install pip-audit)")
     }
 }
 
-# ── 5. Report ─────────────────────────────────────────────────────────────────
+# 6. Report
+Write-Host "[CRITICAL] ($($findings_critical.Count))"
+foreach ($f in $findings_critical) { Write-Host "  * $f" }
+if ($findings_critical.Count -gt 0) { Write-Host "" }
 
-Write-Host ""
-Write-Host "🔍 WebGuard Code Report — $(Split-Path $Path -Leaf)"
-Write-Host "  📁 $totalFiles files scanned"
-Write-Host "━━━━━━━━━━━━━━━━━━━"
-Write-Host ""
+Write-Host "[HIGH] ($($findings_high.Count))"
+foreach ($f in $findings_high) { Write-Host "  * $f" }
+if ($findings_high.Count -gt 0) { Write-Host "" }
 
-$sections = @(
-    @{ list=$findings_crit; icon="🔴"; label="CRITICAL"; color="Red" },
-    @{ list=$findings_high; icon="🟠"; label="HIGH";     color="DarkYellow" },
-    @{ list=$findings_med;  icon="🟡"; label="MEDIUM";   color="Yellow" },
-    @{ list=$findings_low;  icon="🟢"; label="LOW";      color="Green" }
-)
+Write-Host "[MEDIUM] ($($findings_medium.Count))"
+foreach ($f in $findings_medium) { Write-Host "  * $f" }
+if ($findings_medium.Count -gt 0) { Write-Host "" }
 
-$hasFindings = $false
-foreach ($sec in $sections) {
-    if ($sec.list.Count -gt 0) {
-        $hasFindings = $true
-        Write-Host "$($sec.icon) $($sec.label) ($($sec.list.Count))" -ForegroundColor $sec.color
-        foreach ($f in $sec.list) {
-            Write-Host "  • $f"
-        }
-        Write-Host ""
-    }
-}
-
-if (-not $hasFindings) {
-    Write-Host "✅ No vulnerabilities found!" -ForegroundColor Green
-    Write-Host ""
-}
+Write-Host "[LOW] ($($findings_low.Count))"
+foreach ($f in $findings_low) { Write-Host "  * $f" }
+if ($findings_low.Count -gt 0) { Write-Host "" }
 
 if ($passed.Count -gt 0) {
-    Write-Host "✅ PASSED"
-    foreach ($p in $passed) {
-        Write-Host "  • $p" -ForegroundColor Green
-    }
+    Write-Host "PASSED:"
+    foreach ($p in $passed) { Write-Host "  * $p" }
     Write-Host ""
 }
 
-# Top fixes
-$allFindings = @($findings_crit) + @($findings_high) + @($findings_med) + @($findings_low)
-if ($allFindings.Count -gt 0) {
-    Write-Host "📋 Top Fix:"
-    $allFindings | Select-Object -First 2 | ForEach-Object { Write-Host "→ $_" -ForegroundColor Cyan }
-    Write-Host ""
-}
-
-Write-Host "━━━━━━━━━━━━━━━━━━━"
+Write-Host "-----------------------------------"
 Write-Host "by cybersecurity experts | WebGuard v1.0"
