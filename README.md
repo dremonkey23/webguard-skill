@@ -7,7 +7,7 @@
 **Version:** 1.0  
 **Categories:** 🔒 Security · 🛠️ Dev Tools  
 **Platform:** Windows (PowerShell) + Mac/Linux (Bash)  
-**Author:** by cybersecurity experts
+**Author:** by @drizzy8423
 
 ---
 
@@ -68,7 +68,7 @@ Every scan produces a severity-graded report:
 → Add CSP header: Content-Security-Policy: default-src 'self'
 
 ━━━━━━━━━━━━━━━━━━━
-by cybersecurity experts | WebGuard v1.0
+by @drizzy8423 | WebGuard v1.0
 ```
 
 ---
@@ -172,4 +172,4 @@ WebGuard **never** stores, logs, or sends the content of scanned files or URLs a
 
 ---
 
-*WebGuard v1.0 — by cybersecurity experts*
+*WebGuard v1.0 — by @drizzy8423*
