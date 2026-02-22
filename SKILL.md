@@ -1,219 +1,147 @@
-# WebGuard — Security Scanner Skill
+# WebGuard Skill
 
-> Find vulnerabilities before attackers do.
+**Find vulnerabilities before attackers do.**
 
-**Version:** 1.0  
-**Categories:** Security, Dev Tools  
-**Platform:** Windows (PowerShell) + Mac/Linux (Bash)
+WebGuard is a two-mode security scanner. Give it a URL or a local code folder — it returns a prioritized report of security issues with actionable fixes.
 
 ---
 
-## What You Do
+## Modes
 
-WebGuard is a two-mode security scanner:
+### Mode 1 — URL Scanner (Frontend)
+Scans any public URL for frontend security vulnerabilities.
 
-- **Mode 1 — URL Scanner:** Fetch a live URL and check its frontend security posture (headers, exposed files, library versions, SSL, mixed content).
-- **Mode 2 — Code Scanner:** Scan a local folder recursively for hardcoded secrets, dangerous functions, SQL injection patterns, and dependency vulnerabilities.
+**Trigger phrases:**
+- "scan [URL]"
+- "check [URL] for vulnerabilities"
+- "webguard [URL]"
+- "security scan [URL]"
 
----
+**What it checks:**
+1. **SSL/HTTPS** — Is HTTPS enforced? Is the certificate valid?
+2. **Security headers** — CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+3. **Outdated JS libraries** — Detects jQuery, React, lodash, Angular, Bootstrap versions in HTML/JS
+4. **Exposed sensitive files** — Tests for `.env`, `.git/config`, `.htaccess`, `backup.zip`, `config.php`
+5. **Mixed content** — HTTP assets loaded on HTTPS pages
 
-## When to Use Which Mode
-
-| Trigger | Use |
-|---|---|
-| User gives you a URL | Mode 1 (URL scan) |
-| User gives you a folder path | Mode 2 (Code scan) |
-| User says "scan my site" | Ask: URL or local code? |
-| User says "check for secrets" | Mode 2 |
-| User says "check headers / SSL" | Mode 1 |
-
----
-
-## Mode 1: Frontend URL Scanner
-
-### What to Check
-
-1. **SSL/HTTPS**
-   - Is the URL served over HTTPS?
-   - Does HTTP redirect to HTTPS?
-   - Is the cert valid (not expired, hostname matches)?
-
-2. **Security Headers** (inspect response headers)
-   - `Content-Security-Policy` — missing = HIGH
-   - `Strict-Transport-Security` — missing = HIGH
-   - `X-Frame-Options` — missing = MEDIUM
-   - `X-Content-Type-Options` — missing = LOW
-   - `Referrer-Policy` — missing = LOW
-
-3. **Outdated / Vulnerable JS Libraries**
-   - Fetch the HTML source, find `<script>` tags
-   - Detect version strings for: jQuery, React, lodash, Angular, Bootstrap
-   - Flag versions known to have CVEs (see reference table below)
-
-4. **Exposed Sensitive Files**
-   - Attempt to fetch these paths (expect 403/404 for safe sites):
-     - `/.env`
-     - `/.git/config`
-     - `/.htaccess`
-     - `/backup.zip`
-     - `/config.php`
-   - If response is 200 and body is non-empty → flag as CRITICAL or HIGH
-
-5. **Mixed Content**
-   - If page is HTTPS, check HTML for `http://` in `src=`, `href=`, `url(` attributes
-   - Flag any HTTP asset loaded on an HTTPS page → MEDIUM
-
-### Vulnerable Library Reference
-
-| Library | Vulnerable Version | CVE | Severity |
-|---|---|---|---|
-| jQuery | < 1.9.0 | CVE-2011-4969 | HIGH |
-| jQuery | 1.x–3.4.x | CVE-2019-11358 | HIGH |
-| jQuery | < 3.5.0 | CVE-2020-11022 | HIGH |
-| Bootstrap | < 3.4.1 | CVE-2019-8331 | MEDIUM |
-| Bootstrap | < 4.3.1 | CVE-2019-8331 | MEDIUM |
-| Angular | 1.x (AngularJS) | CVE-2019-14863 | HIGH |
-| lodash | < 4.17.21 | CVE-2021-23337 | HIGH |
-
-### Running Mode 1
-
-**Windows:**
-```
-.\scan-url.ps1 -Url "https://example.com"
-```
-
-**Mac/Linux:**
-```
-bash scan-url.sh https://example.com
-```
+**Run:** `scan-url.ps1 <URL>` (Windows) or `scan-url.sh <URL>` (Mac/Linux)
 
 ---
 
-## Mode 2: Code Scanner
+### Mode 2 — Code Scanner (Local Folder)
+Scans a local codebase for security vulnerabilities.
 
-### What to Scan
+**Trigger phrases:**
+- "scan code in [path]"
+- "audit [folder path]"
+- "webguard code [path]"
+- "scan my code at [path]"
 
-Recursively scan all `.js`, `.ts`, `.py`, `.php`, `.rb`, `.env`, `.json`, `.yaml`, `.yml`, `.toml` files.
+**What it checks:**
+1. **Hardcoded secrets** — API keys, passwords, tokens (patterns: `sk-`, `AKIA`, `ghp_`, `password=`, `api_key=`, `secret=`, `token=`)
+2. **Dangerous functions** — `eval()`, `exec()`, `system()`, `innerHTML=`, `dangerouslySetInnerHTML`
+3. **SQL injection patterns** — String concatenation in SQL queries
+4. **Dependency vulnerabilities** — `npm audit` (if `package.json` found), `pip audit` (if `requirements.txt` found)
 
-1. **Hardcoded Secrets** (CRITICAL)
-   - Patterns to flag:
-     - `sk-[A-Za-z0-9]{32,}` — OpenAI keys
-     - `AKIA[0-9A-Z]{16}` — AWS access keys
-     - `ghp_[A-Za-z0-9]{36}` — GitHub personal access tokens
-     - `password\s*=\s*['"][^'"]{4,}` — hardcoded passwords
-     - `api_key\s*=\s*['"][^'"]{4,}` — hardcoded API keys
-     - `secret\s*=\s*['"][^'"]{4,}` — hardcoded secrets
-     - `token\s*=\s*['"][^'"]{4,}` — hardcoded tokens
-     - `Bearer [A-Za-z0-9\-._~+\/]{20,}` — Bearer tokens in code
+**File types scanned:** `.js`, `.ts`, `.py`, `.php`, `.rb` (recursive)
 
-2. **Dangerous Functions** (HIGH)
-   - `eval(` — arbitrary code execution
-   - `exec(` — shell execution (Python/PHP)
-   - `system(` — OS command execution
-   - `innerHTML =` / `innerHTML=` — XSS risk
-   - `dangerouslySetInnerHTML` — XSS risk in React
-   - `document.write(` — XSS risk
-   - `subprocess.call(` — shell execution
-   - `shell_exec(` — PHP shell exec
-
-3. **SQL Injection Patterns** (HIGH)
-   - String concatenation in SQL queries:
-     - `"SELECT.*" + ` or `'SELECT.*' + `
-     - `query = ".*" + variable`
-     - `execute(".*" +` or `execute('.*' +`
-     - `.format(` inside SQL strings
-     - f-strings containing SQL keywords (`f"SELECT`, `f'INSERT`)
-
-4. **Dependency Audits** (run if files exist)
-   - `package.json` → run `npm audit --json`
-   - `requirements.txt` → run `pip audit` (if installed) or `safety check`
-   - Report HIGH/CRITICAL findings from audit output
-
-### Running Mode 2
-
-**Windows:**
-```
-.\scan-code.ps1 -Path "C:\MyProject"
-```
-
-**Mac/Linux:**
-```
-bash scan-code.sh /path/to/project
-```
+**Run:** `scan-code.ps1 <FOLDER>` (Windows) or `scan-code.sh <FOLDER>` (Mac/Linux)
 
 ---
 
 ## Output Format
 
-Always use this exact format:
+All reports follow this severity structure:
 
 ```
 🔍 WebGuard Report — <target>
 ━━━━━━━━━━━━━━━━━━━
 
 🔴 CRITICAL (n)
-  • <finding description>
+  • <issue description>
 
 🟠 HIGH (n)
-  • <finding description>
+  • <issue description>
 
 🟡 MEDIUM (n)
-  • <finding description>
+  • <issue description>
 
 🟢 LOW (n)
-  • <finding description>
+  • <issue description>
 
-✅ PASSED
-  • <things that were checked and are fine>
+ℹ️ INFO (n)
+  • <observation, no action required>
 
 📋 Top Fix:
-→ <most important fix, one line>
-→ <second most important fix, one line>
+→ <most important fix>
+→ <second most important fix>
 
 ━━━━━━━━━━━━━━━━━━━
 by cybersecurity experts | WebGuard v1.0
 ```
 
-### Severity Rules
-
-| Level | When to Use |
-|---|---|
-| 🔴 CRITICAL | Data exposure, accessible secrets/configs, no HTTPS |
-| 🟠 HIGH | Missing critical headers (CSP, HSTS), known CVE libraries, dangerous functions, SQL injection |
-| 🟡 MEDIUM | Missing moderate headers (X-Frame-Options), mixed content, outdated deps |
-| 🟢 LOW | Missing minor headers (Referrer-Policy, X-Content-Type-Options) |
-
-### Skip Empty Sections
-
-If no findings exist for a severity level, omit that section entirely. Do not print `🔴 CRITICAL (0)`.
+**Severity Definitions:**
+- 🔴 CRITICAL — Active exploitation risk, no HTTPS, credentials exposed
+- 🟠 HIGH — Missing critical headers, known CVE libraries, secrets in code
+- 🟡 MEDIUM — Sensitive file exposure, dangerous functions, mixed content
+- 🟢 LOW — Missing defensive headers, minor best-practice gaps
+- ℹ️ INFO — Observations that don't require immediate action
 
 ---
 
 ## Agent Instructions
 
-1. **Detect mode** from user input (URL → Mode 1, folder path → Mode 2, ambiguous → ask).
-2. **Run the appropriate script** using `exec` tool with the target.
-3. **Parse the output** and present it formatted in the report structure above.
-4. **Offer next steps:** Explain the top fix in plain language, offer to re-scan after they fix it.
-5. **Do not guess** — only report what the scanner actually found. Do not hallucinate CVEs.
+### When user provides a URL:
+1. Detect if the URL starts with `http://` or `https://` to determine protocol
+2. Run `scan-url.ps1` (Windows) or `scan-url.sh` (Mac/Linux) against the URL
+3. Parse the script output and format it into the severity report above
+4. Lead with the most critical finding in plain English
+5. Always include the "Top Fix" section with 1–3 actionable steps
 
-### Example Agent Invocations
+### When user provides a folder path:
+1. Verify the path exists before scanning
+2. Run `scan-code.ps1` (Windows) or `scan-code.sh` (Mac/Linux) against the path
+3. Group findings by severity and file location
+4. If `npm audit` or `pip audit` is available, include those results
+5. Include file path + line number for every finding when available
 
+### General:
+- Never modify the target files during a scan — read-only
+- If a scan takes >30 seconds, notify the user you're still working
+- If a URL is unreachable, report it as a scan failure (not a security issue)
+- Truncate very large reports (>50 findings) to top 20 by severity
+- Always end with the WebGuard credit line
+
+---
+
+## Dependencies
+
+| Tool | Required For | Notes |
+|------|-------------|-------|
+| `curl` or `Invoke-WebRequest` | Mode 1 | Pre-installed on most systems |
+| `PowerShell 5+` | `.ps1` scripts | Windows built-in |
+| `bash` | `.sh` scripts | Mac/Linux built-in |
+| `npm` | Dependency audit | Optional — skip if not installed |
+| `pip` | Dependency audit | Optional — skip if not installed |
+
+---
+
+## Examples
+
+**Scan a URL:**
 ```
-User: "Scan https://mysite.com for security issues"
-→ Run: scan-url.ps1 -Url https://mysite.com (Windows) or scan-url.sh https://mysite.com (Linux/Mac)
-→ Parse output → Present report
+scan https://example.com
+webguard https://myapp.com
+check https://shop.example.com for vulnerabilities
+```
 
-User: "Check my code at C:\Projects\myapp for secrets"
-→ Run: scan-code.ps1 -Path "C:\Projects\myapp"
-→ Parse output → Present report
+**Scan code:**
+```
+scan code in C:\Projects\myapp
+webguard code /home/user/projects/backend
+audit /var/www/html
 ```
 
 ---
 
-## Notes
-
-- Always use the scripts for scanning — do not attempt manual HTTP requests in the agent.
-- Scripts output structured text with severity prefixes (`[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[LOW]`, `[PASS]`) — parse these to build the report.
-- If a script fails (missing tools, permissions), report the error gracefully and suggest what the user needs to install.
-- Never store or log credentials found during scanning — report the location only (file + line number).
+*WebGuard v1.0 — by cybersecurity experts*
