@@ -1,174 +1,291 @@
+# WebGuard — Code Scanner (PowerShell)
+# Usage: .\scan-code.ps1 <FOLDER_PATH>
+# Example: .\scan-code.ps1 C:\Projects\myapp
+
 param(
     [Parameter(Mandatory=$true)]
-    [string]$Path
+    [string]$FolderPath
 )
 
-if (-not (Test-Path $Path)) {
-    Write-Error "Path not found: $Path"
+$ErrorActionPreference = "SilentlyContinue"
+
+# ─── Validate path ───────────────────────────────────────────────────────────
+if (-not (Test-Path $FolderPath -PathType Container)) {
+    Write-Host "❌ Folder not found: $FolderPath" -ForegroundColor Red
     exit 1
 }
 
-$findings_critical = [System.Collections.Generic.List[string]]::new()
-$findings_high     = [System.Collections.Generic.List[string]]::new()
-$findings_medium   = [System.Collections.Generic.List[string]]::new()
-$findings_low      = [System.Collections.Generic.List[string]]::new()
-$passed            = [System.Collections.Generic.List[string]]::new()
+$FolderPath = (Resolve-Path $FolderPath).Path
+$DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 Write-Host ""
-Write-Host "WebGuard Code Report -- $Path"
-Write-Host "-----------------------------------"
+Write-Host "🔍 WebGuard — Scanning code at: $FolderPath" -ForegroundColor Cyan
 Write-Host ""
 
-# 1. Collect files
-$extensions = @("*.js","*.ts","*.py","*.php","*.rb","*.cs","*.java","*.go","*.rs")
-$allFiles = @()
-foreach ($ext in $extensions) {
-    $allFiles += Get-ChildItem -Path $Path -Recurse -Filter $ext -ErrorAction SilentlyContinue
-}
-Write-Host "Scanning $($allFiles.Count) source files..."
-Write-Host ""
+# ─── Severity buckets ────────────────────────────────────────────────────────
+$critical = @()
+$high     = @()
+$medium   = @()
+$low      = @()
+$info     = @()
 
-# 2. Secret patterns
+# ─── Get all target files ────────────────────────────────────────────────────
+$extensions = @("*.js","*.ts","*.py","*.php","*.rb","*.env","*.yaml","*.yml","*.json")
+$excludeDirs = @("node_modules",".git","vendor","dist","build",".next","__pycache__")
+
+$allFiles = Get-ChildItem -Path $FolderPath -Recurse -Include $extensions -File |
+    Where-Object {
+        $path = $_.FullName
+        $exclude = $false
+        foreach ($dir in $excludeDirs) {
+            if ($path -match [regex]::Escape("\$dir\")) { $exclude = $true; break }
+        }
+        -not $exclude
+    }
+
+$fileCount = $allFiles.Count
+$info += "$fileCount source file(s) scanned"
+
+# ─── 1. Hardcoded Secrets ────────────────────────────────────────────────────
 $secretPatterns = @(
-    @{ name="OpenAI API Key";    regex='sk-[A-Za-z0-9]{32,}';        level="CRITICAL" },
-    @{ name="AWS Access Key";    regex='AKIA[0-9A-Z]{16}';            level="CRITICAL" },
-    @{ name="GitHub Token";      regex='ghp_[A-Za-z0-9]{36}';        level="CRITICAL" },
-    @{ name="Stripe Secret Key"; regex='sk_live_[A-Za-z0-9]{24,}';   level="CRITICAL" },
-    @{ name="Generic API Key";   regex='api[_-]?key\s*[=:]\s*["\x27][A-Za-z0-9\-_]{16,}'; level="HIGH" },
-    @{ name="Hardcoded Password";regex='password\s*[=:]\s*["\x27][^"\x27\s]{6,}'; level="HIGH" },
-    @{ name="Bearer Token";      regex='Bearer\s+[A-Za-z0-9\-._~+/]+=*'; level="HIGH" },
-    @{ name="Private Key Block"; regex='-----BEGIN.*PRIVATE KEY-----'; level="CRITICAL" }
+    @{ Regex = 'sk-[a-zA-Z0-9]{20,}';                     Desc = "OpenAI API key pattern (sk-...)";              Sev = "critical" },
+    @{ Regex = 'AKIA[0-9A-Z]{16}';                         Desc = "AWS Access Key ID (AKIA...)";                 Sev = "critical" },
+    @{ Regex = 'ghp_[a-zA-Z0-9]{36}';                      Desc = "GitHub Personal Access Token (ghp_...)";     Sev = "critical" },
+    @{ Regex = 'xox[baprs]-[a-zA-Z0-9\-]{10,}';           Desc = "Slack token (xox...)";                       Sev = "critical" },
+    @{ Regex = 'AIza[0-9A-Za-z\-_]{35}';                   Desc = "Google API key (AIza...)";                   Sev = "critical" },
+    @{ Regex = 'ey[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.?[A-Za-z0-9\-_.+/=]*'; Desc = "JWT token hardcoded"; Sev = "high" },
+    @{ Regex = '(?i)password\s*[=:]\s*["\x27][^"\x27]{4,}["\x27]';  Desc = "Hardcoded password";              Sev = "critical" },
+    @{ Regex = '(?i)api_key\s*[=:]\s*["\x27][^"\x27]{6,}["\x27]';   Desc = "Hardcoded API key";               Sev = "critical" },
+    @{ Regex = '(?i)secret\s*[=:]\s*["\x27][^"\x27]{6,}["\x27]';    Desc = "Hardcoded secret";                Sev = "critical" },
+    @{ Regex = '(?i)token\s*[=:]\s*["\x27][^"\x27]{8,}["\x27]';     Desc = "Hardcoded token";                 Sev = "high" },
+    @{ Regex = '(?i)db_password\s*[=:]\s*["\x27][^"\x27]+["\x27]';  Desc = "Hardcoded database password";     Sev = "critical" },
+    @{ Regex = '(?i)private_key\s*[=:]\s*["\x27][^"\x27]{10,}["\x27]'; Desc = "Hardcoded private key";       Sev = "critical" },
+    @{ Regex = '-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----';         Desc = "Private key material in source"; Sev = "critical" }
 )
-
-# 3. Dangerous function patterns
-$dangerPatterns = @(
-    @{ name="eval()";                  regex='\beval\s*\(';             level="HIGH" },
-    @{ name="innerHTML assignment";    regex='innerHTML\s*=';           level="MEDIUM" },
-    @{ name="dangerouslySetInnerHTML"; regex='dangerouslySetInnerHTML'; level="MEDIUM" },
-    @{ name="exec() shell call";       regex='\bexec\s*\(';             level="HIGH" },
-    @{ name="system() call";           regex='\bsystem\s*\(';           level="HIGH" },
-    @{ name="document.write()";        regex='document\.write\s*\(';   level="MEDIUM" },
-    @{ name="setTimeout(string)";      regex='setTimeout\s*\(\s*["\x27]'; level="LOW" }
-)
-
-# 4. SQL injection patterns
-$sqlPatterns = @(
-    @{ name="String concat in query"; regex='(query|sql|execute)\s*\+\s*["\x27\$]'; level="HIGH" },
-    @{ name="Format string in SQL";   regex='(query|sql)\s*%\s*\(';                 level="HIGH" },
-    @{ name="Raw SQL f-string";       regex='f["\x27]SELECT.*WHERE.*\{';            level="HIGH" }
-)
-
-$secretFound = $false
-$dangerFound = $false
-$sqlFound    = $false
 
 foreach ($file in $allFiles) {
-    $relPath = $file.FullName.Replace($Path, "").TrimStart("\\/")
     try {
-        $content = Get-Content $file.FullName -ErrorAction Stop
-
+        $lines = Get-Content $file.FullName -ErrorAction Stop
         $lineNum = 0
-        foreach ($line in $content) {
+        foreach ($line in $lines) {
             $lineNum++
+            # Skip comment-only lines
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith("#") -or $trimmed.StartsWith("//") -or $trimmed.StartsWith("*")) { continue }
 
-            # Secrets
-            foreach ($pat in $secretPatterns) {
-                if ($line -match $pat.regex) {
-                    $secretFound = $true
-                    if ($pat.level -eq "CRITICAL") {
-                        $findings_critical.Add("$($pat.name) in $relPath (line $lineNum)")
-                    } else {
-                        $findings_high.Add("$($pat.name) in $relPath (line $lineNum)")
+            foreach ($pattern in $secretPatterns) {
+                if ($line -match $pattern.Regex) {
+                    $relPath = $file.FullName.Replace($FolderPath, "").TrimStart("\")
+                    $msg = "$($pattern.Desc) in $relPath line $lineNum"
+                    switch ($pattern.Sev) {
+                        "critical" { $critical += $msg }
+                        "high"     { $high     += $msg }
                     }
-                }
-            }
-
-            # Dangerous functions
-            foreach ($pat in $dangerPatterns) {
-                if ($line -match $pat.regex) {
-                    $dangerFound = $true
-                    if ($pat.level -eq "HIGH") {
-                        $findings_high.Add("$($pat.name) in $relPath (line $lineNum)")
-                    } elseif ($pat.level -eq "MEDIUM") {
-                        $findings_medium.Add("$($pat.name) in $relPath (line $lineNum)")
-                    } else {
-                        $findings_low.Add("$($pat.name) in $relPath (line $lineNum)")
-                    }
-                }
-            }
-
-            # SQL injection
-            foreach ($pat in $sqlPatterns) {
-                if ($line -match $pat.regex) {
-                    $sqlFound = $true
-                    $findings_high.Add("$($pat.name) in $relPath (line $lineNum) - possible SQL injection")
+                    break  # one finding per line
                 }
             }
         }
-    } catch { }
+    } catch {}
 }
 
-if (-not $secretFound) { $passed.Add("No hardcoded secrets detected") }
-if (-not $dangerFound) { $passed.Add("No dangerous functions detected") }
-if (-not $sqlFound)    { $passed.Add("No SQL injection patterns detected") }
+# ─── 2. Dangerous Functions ──────────────────────────────────────────────────
+$dangerousPatterns = @(
+    @{ Regex = '\beval\s*\(';                     Desc = "eval() usage — arbitrary code execution risk";     Sev = "high" },
+    @{ Regex = '\bexec\s*\(';                     Desc = "exec() usage — shell injection risk";              Sev = "high" },
+    @{ Regex = '\bsystem\s*\(';                   Desc = "system() call — shell injection risk";             Sev = "high" },
+    @{ Regex = '\.innerHTML\s*=';                 Desc = "innerHTML assignment — XSS risk";                  Sev = "high" },
+    @{ Regex = 'dangerouslySetInnerHTML';          Desc = "dangerouslySetInnerHTML usage — XSS risk (React)"; Sev = "high" },
+    @{ Regex = '\bshell_exec\s*\(';               Desc = "shell_exec() usage — shell injection risk (PHP)";  Sev = "high" },
+    @{ Regex = '\bpassthru\s*\(';                 Desc = "passthru() usage — shell injection risk (PHP)";    Sev = "high" },
+    @{ Regex = '\bpickle\.loads?\s*\(';           Desc = "pickle.load() with untrusted data — deserialization risk (Python)"; Sev = "medium" },
+    @{ Regex = '\bdeserialize\s*\(';              Desc = "deserialize() usage — potential deserialization attack"; Sev = "medium" },
+    @{ Regex = '\bdocument\.write\s*\(';          Desc = "document.write() usage — XSS risk";               Sev = "medium" },
+    @{ Regex = 'subprocess\.(call|run|Popen).*shell\s*=\s*True'; Desc = "subprocess with shell=True — shell injection risk"; Sev = "high" }
+)
 
-# 5. Dependency audit
-$pkgJson = Join-Path $Path "package.json"
-$reqTxt  = Join-Path $Path "requirements.txt"
+foreach ($file in ($allFiles | Where-Object { $_.Extension -in ".js",".ts",".py",".php",".rb" })) {
+    try {
+        $lines = Get-Content $file.FullName -ErrorAction Stop
+        $lineNum = 0
+        foreach ($line in $lines) {
+            $lineNum++
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith("#") -or $trimmed.StartsWith("//") -or $trimmed.StartsWith("*")) { continue }
 
-if (Test-Path $pkgJson) {
-    Write-Host "Running npm audit..."
-    $npmOut = npm audit --json 2>$null | ConvertFrom-Json -ErrorAction SilentlyContinue
-    if ($npmOut -and $npmOut.metadata) {
-        $vulns = $npmOut.metadata.vulnerabilities
-        $total = $vulns.critical + $vulns.high + $vulns.moderate + $vulns.low
-        if ($total -gt 0) {
-            if ($vulns.critical -gt 0) {
-                $findings_critical.Add("npm audit: $($vulns.critical) CRITICAL vulnerabilities - run 'npm audit fix'")
+            foreach ($pattern in $dangerousPatterns) {
+                if ($line -match $pattern.Regex) {
+                    $relPath = $file.FullName.Replace($FolderPath, "").TrimStart("\")
+                    $msg = "$($pattern.Desc) — $relPath line $lineNum"
+                    switch ($pattern.Sev) {
+                        "high"   { $high   += $msg }
+                        "medium" { $medium += $msg }
+                    }
+                    break
+                }
             }
-            if ($vulns.high -gt 0) {
-                $findings_high.Add("npm audit: $($vulns.high) HIGH vulnerabilities")
-            }
-        } else {
-            $passed.Add("npm audit: no vulnerabilities found")
         }
+    } catch {}
+}
+
+# ─── 3. SQL Injection Patterns ───────────────────────────────────────────────
+$sqlPatterns = @(
+    @{ Regex = '(?i)(SELECT|INSERT|UPDATE|DELETE|DROP).*\+\s*[\$\w]';    Desc = "SQL query with string concatenation — injection risk" },
+    @{ Regex = '(?i)(SELECT|INSERT|UPDATE|DELETE).*\bWHERE\b.*\+';       Desc = "SQL WHERE clause with concatenation — injection risk" },
+    @{ Regex = '(?i)query\s*\(.*\+\s*[\$\w]';                            Desc = "DB query() with concatenated variable — injection risk" },
+    @{ Regex = '(?i)execute\s*\(\s*["\x27].*\+';                         Desc = "DB execute() with string concatenation — injection risk" },
+    @{ Regex = '(?i)\$_(GET|POST|REQUEST|COOKIE)\[.*\].*sql';            Desc = "User input directly used in SQL context (PHP) — injection risk" }
+)
+
+foreach ($file in ($allFiles | Where-Object { $_.Extension -in ".js",".ts",".py",".php",".rb" })) {
+    try {
+        $lines = Get-Content $file.FullName -ErrorAction Stop
+        $lineNum = 0
+        foreach ($line in $lines) {
+            $lineNum++
+            $trimmed = $line.Trim()
+            if ($trimmed.StartsWith("#") -or $trimmed.StartsWith("//") -or $trimmed.StartsWith("*")) { continue }
+
+            foreach ($pattern in $sqlPatterns) {
+                if ($line -match $pattern.Regex) {
+                    $relPath = $file.FullName.Replace($FolderPath, "").TrimStart("\")
+                    $high += "$($pattern.Desc) — $relPath line $lineNum"
+                    break
+                }
+            }
+        }
+    } catch {}
+}
+
+# ─── 4. Dependency Audit ─────────────────────────────────────────────────────
+# npm audit
+$packageJson = Join-Path $FolderPath "package.json"
+if (Test-Path $packageJson) {
+    $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+    if ($npmCmd) {
+        Write-Host "  Running npm audit..." -ForegroundColor Gray
+        $npmOutput = & npm audit --json 2>&1 | Out-String
+        try {
+            $npmJson = $npmOutput | ConvertFrom-Json
+            $vulnCount = $npmJson.metadata.vulnerabilities
+            if ($vulnCount) {
+                $crit  = if ($vulnCount.critical) { $vulnCount.critical } else { 0 }
+                $hig   = if ($vulnCount.high)     { $vulnCount.high     } else { 0 }
+                $mod   = if ($vulnCount.moderate)  { $vulnCount.moderate } else { 0 }
+                $lo    = if ($vulnCount.low)       { $vulnCount.low      } else { 0 }
+                if ($crit -gt 0) { $critical += "npm audit: $crit critical vulnerability(-ies) in dependencies — run 'npm audit fix'" }
+                if ($hig  -gt 0) { $high     += "npm audit: $hig high vulnerability(-ies) in dependencies" }
+                if ($mod  -gt 0) { $medium   += "npm audit: $mod moderate vulnerability(-ies) in dependencies" }
+                if ($lo   -gt 0) { $low      += "npm audit: $lo low vulnerability(-ies) in dependencies" }
+                if ($crit + $hig + $mod + $lo -eq 0) { $info += "npm audit: no known vulnerabilities found" }
+            }
+        } catch {
+            $info += "npm audit ran but output could not be parsed"
+        }
+    } else {
+        $info += "package.json found but npm not installed — skipping npm audit"
     }
 }
 
-if (Test-Path $reqTxt) {
-    if (Get-Command pip -ErrorAction SilentlyContinue) {
-        Write-Host "Running pip audit..."
-        $pipOut = pip audit 2>&1
-        if ($pipOut -match "No known vulnerabilities") {
-            $passed.Add("pip audit: no vulnerabilities found")
-        } else {
-            $findings_medium.Add("pip audit found issues - run 'pip audit' for details")
+# pip audit
+$requirementsTxt = Join-Path $FolderPath "requirements.txt"
+if (Test-Path $requirementsTxt) {
+    $pipAuditCmd = Get-Command pip-audit -ErrorAction SilentlyContinue
+    if ($pipAuditCmd) {
+        Write-Host "  Running pip-audit..." -ForegroundColor Gray
+        $pipOutput = & pip-audit --requirement $requirementsTxt --format=json 2>&1 | Out-String
+        try {
+            $pipJson = $pipOutput | ConvertFrom-Json
+            if ($pipJson.Count -gt 0) {
+                $high += "pip-audit: $($pipJson.Count) vulnerable Python package(s) found — run 'pip-audit -r requirements.txt'"
+            } else {
+                $info += "pip-audit: no known Python vulnerabilities found"
+            }
+        } catch {
+            $info += "pip-audit ran but output could not be parsed (check manually)"
         }
+    } else {
+        $info += "requirements.txt found but pip-audit not installed — run 'pip install pip-audit' to enable"
     }
 }
 
-# 6. Report
-Write-Host "[CRITICAL] ($($findings_critical.Count))"
-foreach ($f in $findings_critical) { Write-Host "  * $f" }
-if ($findings_critical.Count -gt 0) { Write-Host "" }
+# ─── Build Report ────────────────────────────────────────────────────────────
+# Deduplicate
+$critical = $critical | Select-Object -Unique
+$high     = $high     | Select-Object -Unique
+$medium   = $medium   | Select-Object -Unique
+$low      = $low      | Select-Object -Unique
+$info     = $info     | Select-Object -Unique
 
-Write-Host "[HIGH] ($($findings_high.Count))"
-foreach ($f in $findings_high) { Write-Host "  * $f" }
-if ($findings_high.Count -gt 0) { Write-Host "" }
+# Truncate if over 20
+if ($critical.Count + $high.Count + $medium.Count + $low.Count -gt 20) {
+    $info += "(Results truncated to top findings by severity)"
+    $critical = $critical | Select-Object -First 5
+    $high     = $high     | Select-Object -First 8
+    $medium   = $medium   | Select-Object -First 5
+    $low      = $low      | Select-Object -First 2
+}
 
-Write-Host "[MEDIUM] ($($findings_medium.Count))"
-foreach ($f in $findings_medium) { Write-Host "  * $f" }
-if ($findings_medium.Count -gt 0) { Write-Host "" }
+$targetLabel = Split-Path $FolderPath -Leaf
 
-Write-Host "[LOW] ($($findings_low.Count))"
-foreach ($f in $findings_low) { Write-Host "  * $f" }
-if ($findings_low.Count -gt 0) { Write-Host "" }
+Write-Host ""
+Write-Host "🔍 WebGuard Report — $targetLabel"
+Write-Host $DIVIDER
+Write-Host ""
 
-if ($passed.Count -gt 0) {
-    Write-Host "PASSED:"
-    foreach ($p in $passed) { Write-Host "  * $p" }
+if ($critical.Count -gt 0) {
+    Write-Host "🔴 CRITICAL ($($critical.Count))" -ForegroundColor Red
+    foreach ($i in $critical) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($high.Count -gt 0) {
+    Write-Host "🟠 HIGH ($($high.Count))" -ForegroundColor DarkYellow
+    foreach ($i in $high) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($medium.Count -gt 0) {
+    Write-Host "🟡 MEDIUM ($($medium.Count))" -ForegroundColor Yellow
+    foreach ($i in $medium) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($low.Count -gt 0) {
+    Write-Host "🟢 LOW ($($low.Count))" -ForegroundColor Green
+    foreach ($i in $low) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($info.Count -gt 0) {
+    Write-Host "ℹ️  INFO ($($info.Count))" -ForegroundColor Gray
+    foreach ($i in $info) { Write-Host "  • $i" }
     Write-Host ""
 }
 
-Write-Host "-----------------------------------"
+if ($critical.Count -eq 0 -and $high.Count -eq 0 -and $medium.Count -eq 0 -and $low.Count -eq 0) {
+    Write-Host "✅ No issues found — code looks clean!" -ForegroundColor Green
+    Write-Host ""
+}
+
+# Top Fixes
+$topFixes = @()
+if ($critical | Where-Object { $_ -match "password|secret|api_key|token|key" }) {
+    $topFixes += "Move all secrets to environment variables or a secrets manager (never hardcode)"
+}
+if ($critical | Where-Object { $_ -match "npm audit" }) {
+    $topFixes += "Run 'npm audit fix' to auto-remediate vulnerable dependencies"
+}
+if ($high | Where-Object { $_ -match "eval|exec|system|innerHTML" }) {
+    $topFixes += "Replace dangerous functions: use safe alternatives (e.g., textContent instead of innerHTML)"
+}
+if ($high | Where-Object { $_ -match "SQL|injection" }) {
+    $topFixes += "Use parameterized queries / prepared statements for all database operations"
+}
+
+if ($topFixes.Count -gt 0) {
+    Write-Host "📋 Top Fix:" -ForegroundColor Cyan
+    foreach ($fix in ($topFixes | Select-Object -First 3)) {
+        Write-Host "→ $fix"
+    }
+    Write-Host ""
+}
+
+Write-Host $DIVIDER
 Write-Host "by cybersecurity experts | WebGuard v1.0"
+Write-Host ""
