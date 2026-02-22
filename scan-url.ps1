@@ -1,140 +1,269 @@
+# WebGuard — URL Scanner (PowerShell)
+# Usage: .\scan-url.ps1 <URL>
+# Example: .\scan-url.ps1 https://example.com
+
 param(
     [Parameter(Mandatory=$true)]
     [string]$Url
 )
 
-function Get-Header($resp, $name) {
+$ErrorActionPreference = "SilentlyContinue"
+
+# ─── Severity buckets ───────────────────────────────────────────────────────
+$critical = @()
+$high     = @()
+$medium   = @()
+$low      = @()
+$info     = @()
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+function Try-Fetch {
+    param([string]$TargetUrl, [int]$TimeoutSec = 10)
     try {
-        if ($resp.Headers.ContainsKey($name)) { return $resp.Headers[$name] }
-    } catch {}
+        $response = Invoke-WebRequest -Uri $TargetUrl `
+            -UseBasicParsing `
+            -TimeoutSec $TimeoutSec `
+            -MaximumRedirection 0 `
+            -ErrorAction Stop
+        return $response
+    } catch {
+        return $null
+    }
+}
+
+function Try-FetchFollow {
+    param([string]$TargetUrl, [int]$TimeoutSec = 15)
+    try {
+        $response = Invoke-WebRequest -Uri $TargetUrl `
+            -UseBasicParsing `
+            -TimeoutSec $TimeoutSec `
+            -ErrorAction Stop
+        return $response
+    } catch {
+        return $null
+    }
+}
+
+function Get-Header {
+    param($Headers, [string]$Name)
+    if ($Headers -and $Headers[$Name]) { return $Headers[$Name] }
     return $null
 }
 
-$Url = $Url.TrimEnd('/')
-$isHttps = $Url -match '^https://'
-$targetHost = ([System.Uri]$Url).Host
-$findings = @()
-$passed   = @()
+# ─── Normalize URL ──────────────────────────────────────────────────────────
+$Url = $Url.TrimEnd("/")
+if ($Url -notmatch "^https?://") { $Url = "https://$Url" }
+$uri      = [System.Uri]$Url
+$host     = $uri.Host
+$isHttps  = $uri.Scheme -eq "https"
+$baseUrl  = "$($uri.Scheme)://$($uri.Host)"
+$httpBase = "http://$($uri.Host)"
 
 Write-Host ""
-Write-Host "WebGuard URL Report -- $targetHost"
-Write-Host "-----------------------------------"
-Write-Host "Scanning $Url ..."
+Write-Host "🔍 WebGuard — Scanning $host ..." -ForegroundColor Cyan
 Write-Host ""
 
-# 1. SSL / HTTPS
+# ─── 1. SSL / HTTPS Check ───────────────────────────────────────────────────
 if (-not $isHttps) {
-    $findings += @{ level="CRITICAL"; msg="Site not served over HTTPS - traffic can be intercepted" }
+    $critical += "Site uses HTTP — all traffic is unencrypted and can be intercepted"
 } else {
-    $httpUrl = $Url -replace '^https://', 'http://'
-    try {
-        $httpResp = Invoke-WebRequest -Uri $httpUrl -TimeoutSec 8 -UseBasicParsing -MaximumRedirection 5 -ErrorAction Stop
-        if ($httpResp.BaseResponse.ResponseUri.Scheme -ne 'https') {
-            $findings += @{ level="HIGH"; msg="HTTP does not redirect to HTTPS - plaintext access possible" }
-        } else {
-            $passed += "HTTP correctly redirects to HTTPS"
-        }
-    } catch {
-        $passed += "HTTP redirect check inconclusive"
+    # Check if HTTP redirects to HTTPS
+    $httpResp = Try-Fetch -TargetUrl $httpBase
+    if ($httpResp -and $httpResp.StatusCode -eq 200) {
+        $critical += "HTTP version returns 200 (no redirect to HTTPS) — traffic interception risk"
+    } elseif ($httpResp -and $httpResp.StatusCode -in 301, 302, 307, 308) {
+        $info += "HTTPS enforced via redirect ($($httpResp.StatusCode))"
+    } else {
+        $info += "HTTPS detected — encrypted connection"
     }
-    $passed += "HTTPS enforced on main URL"
 }
 
-# 2. Fetch main page
-$mainResp = $null
-try {
-    $mainResp = Invoke-WebRequest -Uri $Url -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
-} catch {
-    Write-Warning "Could not fetch $Url - $_"
+# ─── 2. Fetch Main Page ─────────────────────────────────────────────────────
+$mainResp = Try-FetchFollow -TargetUrl $Url
+if (-not $mainResp) {
+    Write-Host "❌ Could not reach $Url — scan aborted." -ForegroundColor Red
     exit 1
 }
 
-$html = $mainResp.Content
+$headers = $mainResp.Headers
+$html    = $mainResp.Content
 
-# 3. Security Headers
-$hdrChecks = @(
-    @{ name="Content-Security-Policy";   level="HIGH";   label="Content-Security-Policy (CSP)" },
-    @{ name="Strict-Transport-Security"; level="HIGH";   label="HSTS" },
-    @{ name="X-Frame-Options";           level="MEDIUM"; label="X-Frame-Options" },
-    @{ name="X-Content-Type-Options";    level="LOW";    label="X-Content-Type-Options" },
-    @{ name="Referrer-Policy";           level="LOW";    label="Referrer-Policy" }
-)
-foreach ($h in $hdrChecks) {
-    $val = Get-Header $mainResp $h.name
-    if (-not $val) {
-        $findings += @{ level=$h.level; msg="Missing $($h.label) header" }
-    } else {
-        $passed += "$($h.label) header present"
-    }
+# ─── 3. Security Headers ────────────────────────────────────────────────────
+# CSP
+if (-not (Get-Header $headers "Content-Security-Policy")) {
+    $high += "Missing Content-Security-Policy header — XSS attacks are unrestricted"
+} else {
+    $info += "Content-Security-Policy header present"
 }
 
-# 4. JS Library Detection
-$libPatterns = @(
-    @{ name="jQuery";    regex='jquery[.-](\d+\.\d+\.\d+)';    cve="CVE-2020-11022"; safe="3.5.0"; level="HIGH" },
-    @{ name="Bootstrap"; regex='bootstrap[.-](\d+\.\d+\.\d+)'; cve="CVE-2019-8331";  safe="4.3.1"; level="MEDIUM" },
-    @{ name="lodash";    regex='lodash[.-](\d+\.\d+\.\d+)';    cve="CVE-2021-23337"; safe="4.17.21"; level="HIGH" },
-    @{ name="Angular";   regex='angular[.-](\d+\.\d+\.\d+)';   cve="CVE-2019-14863"; safe="2.0.0"; level="HIGH" }
-)
-foreach ($lib in $libPatterns) {
-    if ($html -match $lib.regex) {
-        $ver = $Matches[1]
-        $findings += @{ level=$lib.level; msg="$($lib.name) $ver detected - check $($lib.cve) (safe: v$($lib.safe)+)" }
-    }
-}
-
-# 5. Exposed Sensitive Files
-$sensitiveFiles = @(
-    @{ path="/.env";        label=".env file" },
-    @{ path="/.git/config"; label=".git/config" },
-    @{ path="/.htaccess";   label=".htaccess" },
-    @{ path="/backup.zip";  label="backup.zip" },
-    @{ path="/config.php";  label="config.php" }
-)
-foreach ($sf in $sensitiveFiles) {
-    $testUrl = "$($Url.TrimEnd('/'))$($sf.path)"
-    try {
-        $sfResp = Invoke-WebRequest -Uri $testUrl -TimeoutSec 8 -UseBasicParsing -ErrorAction Stop
-        if ([int]$sfResp.StatusCode -eq 200 -and $sfResp.Content.Length -gt 10) {
-            $findings += @{ level="CRITICAL"; msg="$($sf.label) publicly accessible at $testUrl - may expose credentials" }
-        }
-    } catch { }
-}
-
-# 6. Mixed Content
+# HSTS
 if ($isHttps) {
-    $mixedMatches = [regex]::Matches($html, '(?i)(src|href|url)\s*=\s*["'']?(http://[^\s"''<>]+)')
-    if ($mixedMatches.Count -gt 0) {
-        $findings += @{ level="MEDIUM"; msg="Mixed content - $($mixedMatches.Count) HTTP asset(s) on HTTPS page" }
+    if (-not (Get-Header $headers "Strict-Transport-Security")) {
+        $high += "Missing Strict-Transport-Security (HSTS) — browsers may fall back to HTTP"
     } else {
-        $passed += "No mixed content detected"
+        $info += "HSTS header present"
     }
 }
 
-# 7. Report
-$levels = @("CRITICAL","HIGH","MEDIUM","LOW")
-$icons  = @{ CRITICAL="[CRITICAL]"; HIGH="[HIGH]"; MEDIUM="[MEDIUM]"; LOW="[LOW]" }
+# X-Frame-Options
+if (-not (Get-Header $headers "X-Frame-Options")) {
+    $medium += "Missing X-Frame-Options header — site may be vulnerable to clickjacking"
+} else {
+    $info += "X-Frame-Options header present"
+}
 
-$hasFindings = $false
-foreach ($lvl in $levels) {
-    $group = $findings | Where-Object { $_.level -eq $lvl }
-    if ($group.Count -gt 0) {
-        $hasFindings = $true
-        Write-Host "$($icons[$lvl]) ($($group.Count))"
-        foreach ($f in $group) { Write-Host "  * $($f.msg)" }
-        Write-Host ""
+# X-Content-Type-Options
+if (-not (Get-Header $headers "X-Content-Type-Options")) {
+    $low += "Missing X-Content-Type-Options header — MIME-type sniffing possible"
+} else {
+    $info += "X-Content-Type-Options header present"
+}
+
+# Referrer-Policy
+if (-not (Get-Header $headers "Referrer-Policy")) {
+    $low += "Missing Referrer-Policy header — referrer data may leak to third parties"
+} else {
+    $info += "Referrer-Policy header present"
+}
+
+# Server header info leak
+$serverHdr = Get-Header $headers "Server"
+if ($serverHdr) {
+    if ($serverHdr -match "\d") {
+        $low += "Server header exposes version info: '$serverHdr' — aids fingerprinting"
+    } else {
+        $info += "Server header present (no version): $serverHdr"
     }
 }
 
-if (-not $hasFindings) {
-    Write-Host "No vulnerabilities found!"
+# X-Powered-By
+$poweredBy = Get-Header $headers "X-Powered-By"
+if ($poweredBy) {
+    $low += "X-Powered-By header exposes technology: '$poweredBy'"
+}
+
+# ─── 4. Outdated/Vulnerable JS Libraries ────────────────────────────────────
+$libPatterns = @(
+    @{ Name = "jQuery";     Regex = 'jquery[.-](\d+\.\d+\.?\d*)(\.min)?\.js|jquery.*version["\s:]+["\x27](\d+\.\d+\.?\d*)'; CVE = "1.x/2.x: CVE-2019-11358 (XSS), CVE-2020-11022" },
+    @{ Name = "Angular";    Regex = 'angular[.-](\d+\.\d+\.?\d*)(\.min)?\.js|angularjs.*version["\s:]+["\x27](\d+\.\d+\.?\d*)'; CVE = "<1.8: multiple XSS CVEs" },
+    @{ Name = "React";      Regex = 'react[.-](\d+\.\d+\.?\d*)(\.min)?\.js'; CVE = "<16.9: CVE-2018-6341" },
+    @{ Name = "Bootstrap";  Regex = 'bootstrap[.-](\d+\.\d+\.?\d*)(\.min)?\.js|bootstrap[.-](\d+\.\d+\.?\d*)(\.min)?\.css'; CVE = "<3.4.1: CVE-2019-8331 (XSS)" },
+    @{ Name = "Lodash";     Regex = 'lodash[.-](\d+\.\d+\.?\d*)(\.min)?\.js'; CVE = "<4.17.21: CVE-2021-23337 (injection)" },
+    @{ Name = "Moment.js";  Regex = 'moment[.-](\d+\.\d+\.?\d*)(\.min)?\.js'; CVE = "<2.29.2: CVE-2022-24785 (path traversal)" }
+)
+
+foreach ($lib in $libPatterns) {
+    if ($html -match $lib.Regex) {
+        $version = if ($Matches[1]) { $Matches[1] } elseif ($Matches[3]) { $Matches[3] } else { "unknown version" }
+        $high += "$($lib.Name) $version detected in page source — $($lib.CVE)"
+    }
+}
+
+# ─── 5. Exposed Sensitive Files ─────────────────────────────────────────────
+$sensitiveFiles = @(
+    @{ Path = "/.env";          Severity = "critical"; Desc = ".env file accessible — may expose credentials and API keys" },
+    @{ Path = "/.git/config";   Severity = "critical"; Desc = ".git/config accessible — source code structure exposed" },
+    @{ Path = "/.htaccess";     Severity = "medium";   Desc = ".htaccess accessible — server config may be readable" },
+    @{ Path = "/backup.zip";    Severity = "high";     Desc = "backup.zip accessible — full site backup may be downloadable" },
+    @{ Path = "/backup.tar.gz"; Severity = "high";     Desc = "backup.tar.gz accessible" },
+    @{ Path = "/config.php";    Severity = "high";     Desc = "config.php accessible — database credentials may be exposed" },
+    @{ Path = "/wp-config.php"; Severity = "high";     Desc = "wp-config.php accessible — WordPress DB credentials exposed" },
+    @{ Path = "/.DS_Store";     Severity = "medium";   Desc = ".DS_Store accessible — directory structure revealed (macOS artifact)" },
+    @{ Path = "/phpinfo.php";   Severity = "high";     Desc = "phpinfo.php accessible — full PHP environment info exposed" },
+    @{ Path = "/server-status"; Severity = "medium";   Desc = "Apache server-status accessible — internal stats visible" }
+)
+
+foreach ($file in $sensitiveFiles) {
+    $testUrl = "$baseUrl$($file.Path)"
+    try {
+        $r = Invoke-WebRequest -Uri $testUrl -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
+        if ($r.StatusCode -eq 200) {
+            switch ($file.Severity) {
+                "critical" { $critical += "$($file.Desc) at $($file.Path)" }
+                "high"     { $high     += "$($file.Desc) at $($file.Path)" }
+                "medium"   { $medium   += "$($file.Desc) at $($file.Path)" }
+            }
+        }
+    } catch {}
+}
+
+# ─── 6. Mixed Content ───────────────────────────────────────────────────────
+if ($isHttps -and $html) {
+    $httpAssets = [regex]::Matches($html, 'src=["\x27](http://[^"]+)["\x27]|href=["\x27](http://[^"]+)["\x27]')
+    if ($httpAssets.Count -gt 0) {
+        $medium += "Mixed content detected — $($httpAssets.Count) HTTP asset(s) loaded on HTTPS page"
+    }
+}
+
+# ─── 7. Cookie Flags ────────────────────────────────────────────────────────
+$setCookie = Get-Header $headers "Set-Cookie"
+if ($setCookie) {
+    if ($setCookie -notmatch "HttpOnly") {
+        $medium += "Session cookie missing HttpOnly flag — JavaScript can read cookies (XSS risk)"
+    }
+    if ($isHttps -and $setCookie -notmatch "Secure") {
+        $medium += "Session cookie missing Secure flag — cookie may be sent over HTTP"
+    }
+    if ($setCookie -notmatch "SameSite") {
+        $low += "Session cookie missing SameSite attribute — CSRF risk"
+    }
+}
+
+# ─── Build Report ───────────────────────────────────────────────────────────
+$divider = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+Write-Host ""
+Write-Host "🔍 WebGuard Report — $host"
+Write-Host $divider
+Write-Host ""
+
+if ($critical.Count -gt 0) {
+    Write-Host "🔴 CRITICAL ($($critical.Count))" -ForegroundColor Red
+    foreach ($i in $critical) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($high.Count -gt 0) {
+    Write-Host "🟠 HIGH ($($high.Count))" -ForegroundColor DarkYellow
+    foreach ($i in $high) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($medium.Count -gt 0) {
+    Write-Host "🟡 MEDIUM ($($medium.Count))" -ForegroundColor Yellow
+    foreach ($i in $medium) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($low.Count -gt 0) {
+    Write-Host "🟢 LOW ($($low.Count))" -ForegroundColor Green
+    foreach ($i in $low) { Write-Host "  • $i" }
+    Write-Host ""
+}
+if ($info.Count -gt 0) {
+    Write-Host "ℹ️  INFO ($($info.Count))" -ForegroundColor Gray
+    foreach ($i in $info) { Write-Host "  • $i" }
     Write-Host ""
 }
 
-if ($passed.Count -gt 0) {
-    Write-Host "PASSED:"
-    foreach ($p in $passed) { Write-Host "  * $p" }
+if ($critical.Count -eq 0 -and $high.Count -eq 0 -and $medium.Count -eq 0 -and $low.Count -eq 0) {
+    Write-Host "✅ No issues found — site looks clean!" -ForegroundColor Green
     Write-Host ""
 }
 
-Write-Host "-----------------------------------"
+# Top Fixes
+$topFixes = @()
+if ($critical | Where-Object { $_ -match "HTTP" })      { $topFixes += "Redirect all HTTP traffic to HTTPS in your server config" }
+if ($critical | Where-Object { $_ -match "\.env" })     { $topFixes += "Block .env access: add 'deny from all' in .htaccess or nginx equivalent" }
+if ($critical | Where-Object { $_ -match "\.git" })     { $topFixes += "Block .git directory access from public web server" }
+if ($high     | Where-Object { $_ -match "CSP|Content-Security-Policy" }) { $topFixes += "Add CSP header: Content-Security-Policy: default-src 'self'" }
+if ($high     | Where-Object { $_ -match "HSTS|Strict-Transport" })       { $topFixes += "Add HSTS header: Strict-Transport-Security: max-age=31536000; includeSubDomains" }
+if ($high     | Where-Object { $_ -match "jQuery|Angular|Bootstrap|Lodash|React|Moment" }) { $topFixes += "Update JS libraries to latest stable versions" }
+
+if ($topFixes.Count -gt 0) {
+    Write-Host "📋 Top Fix:" -ForegroundColor Cyan
+    foreach ($fix in ($topFixes | Select-Object -First 3)) {
+        Write-Host "→ $fix"
+    }
+    Write-Host ""
+}
+
+Write-Host $divider
 Write-Host "by cybersecurity experts | WebGuard v1.0"
+Write-Host ""
