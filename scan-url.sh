@@ -1,240 +1,301 @@
 #!/usr/bin/env bash
-# WebGuard URL Scanner v1.0 — Frontend security scanner (Mac/Linux)
-# Usage: bash scan-url.sh <url>
-# Example: bash scan-url.sh https://example.com
+# WebGuard — URL Scanner (bash)
+# Usage: ./scan-url.sh <URL>
+# Example: ./scan-url.sh https://example.com
 
 set -euo pipefail
 
 URL="${1:-}"
 if [[ -z "$URL" ]]; then
-    echo "Usage: bash scan-url.sh <url>"
-    exit 1
+  echo "Usage: $0 <URL>"
+  exit 1
 fi
 
+# Strip trailing slash
 URL="${URL%/}"
-HOST=$(python3 -c "from urllib.parse import urlparse; print(urlparse('$URL').netloc)" 2>/dev/null || \
-       echo "$URL" | sed 's|https\?://||' | cut -d'/' -f1)
+# Default to https if no scheme
+if [[ "$URL" != http://* && "$URL" != https://* ]]; then
+  URL="https://$URL"
+fi
 
-FINDINGS_CRIT=()
-FINDINGS_HIGH=()
-FINDINGS_MED=()
-FINDINGS_LOW=()
-PASSED=()
+SCHEME="${URL%%://*}"
+HOST=$(echo "$URL" | sed -E 's|https?://([^/]+).*|\1|')
+BASE_URL="${SCHEME}://${HOST}"
+HTTP_BASE="http://${HOST}"
+DIVIDER="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ─── Severity arrays ─────────────────────────────────────────────────────────
+CRITICAL=()
+HIGH=()
+MEDIUM=()
+LOW=()
+INFO=()
+
+echo ""
+echo "🔍 WebGuard — Scanning $HOST ..."
+echo ""
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+check_url_status() {
+  local url="$1"
+  local timeout="${2:-8}"
+  curl -s -o /dev/null -w "%{http_code}" --max-time "$timeout" \
+       --connect-timeout 5 -L "$url" 2>/dev/null || echo "000"
+}
 
 fetch_headers() {
-    curl -sI --max-time 10 --location "$1" 2>/dev/null
+  local url="$1"
+  curl -s -I --max-time 15 --connect-timeout 5 -L "$url" 2>/dev/null || true
 }
 
 fetch_body() {
-    curl -sL --max-time 15 "$1" 2>/dev/null
+  local url="$1"
+  curl -s --max-time 20 --connect-timeout 5 -L "$url" 2>/dev/null || true
 }
 
-fetch_status() {
-    curl -so /dev/null -w "%{http_code}" --max-time 8 --location "$1" 2>/dev/null || echo "0"
+get_header() {
+  local headers="$1"
+  local name="$2"
+  echo "$headers" | grep -i "^${name}:" | head -1 | sed 's/^[^:]*: //' | tr -d '\r' || true
 }
 
-fetch_body_status() {
-    # Returns body to stdout, writes status to $TMPSTATUS
-    TMPSTATUS=$(mktemp)
-    BODY=$(curl -sL --max-time 10 -w "%{http_code}" -o /dev/null "$1" 2>/dev/null || echo "0")
-    echo "$BODY"
-}
-
-header_value() {
-    local headers="$1"
-    local name="$2"
-    echo "$headers" | grep -i "^${name}:" | head -1 | sed 's/^[^:]*: *//' | tr -d '\r'
-}
-
-echo ""
-echo "🔍 WebGuard Report — $HOST"
-echo "━━━━━━━━━━━━━━━━━━━"
-echo "  Scanning $URL ..."
-echo ""
-
-# ── 1. SSL / HTTPS ────────────────────────────────────────────────────────────
-
-if [[ "$URL" != https://* ]]; then
-    FINDINGS_CRIT+=("Site not served over HTTPS — traffic can be intercepted")
+# ─── 1. SSL / HTTPS Check ────────────────────────────────────────────────────
+if [[ "$SCHEME" != "https" ]]; then
+  CRITICAL+=("Site uses HTTP — all traffic is unencrypted and can be intercepted")
 else
-    PASSED+=("HTTPS is enforced on the main URL")
-    # Check HTTP -> HTTPS redirect
-    HTTP_URL="${URL/https:\/\//http://}"
-    REDIR_URL=$(curl -sI --max-time 8 -L "$HTTP_URL" 2>/dev/null | grep -i "^location:" | tail -1 | sed 's/^[Ll]ocation: *//' | tr -d '\r')
-    if [[ "$REDIR_URL" == https://* ]]; then
-        PASSED+=("HTTP correctly redirects to HTTPS")
-    else
-        FINDINGS_HIGH+=("HTTP does not redirect to HTTPS — plaintext access possible")
-    fi
+  # Check if HTTP redirects to HTTPS
+  HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
+    --connect-timeout 5 --max-redirs 0 "$HTTP_BASE" 2>/dev/null || echo "000")
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    CRITICAL+=("HTTP version returns 200 (no redirect to HTTPS) — traffic interception risk")
+  elif [[ "$HTTP_STATUS" =~ ^(301|302|307|308)$ ]]; then
+    INFO+=("HTTPS enforced via redirect ($HTTP_STATUS)")
+  else
+    INFO+=("HTTPS detected — encrypted connection")
+  fi
+
+  # SSL certificate check
+  SSL_CHECK=$(echo | openssl s_client -connect "${HOST}:443" \
+    -servername "$HOST" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null || true)
+  if [[ -z "$SSL_CHECK" ]]; then
+    HIGH+=("SSL certificate could not be verified — may be self-signed or expired")
+  else
+    EXPIRY=$(echo "$SSL_CHECK" | grep "notAfter" | cut -d= -f2)
+    INFO+=("SSL certificate valid — expires: $EXPIRY")
+  fi
 fi
 
-# ── 2. Fetch main page ────────────────────────────────────────────────────────
-
+# ─── 2. Fetch headers and body ───────────────────────────────────────────────
 HEADERS=$(fetch_headers "$URL")
-HTML=$(fetch_body "$URL")
-
-if [[ -z "$HTML" ]]; then
-    echo "[CRITICAL] Could not fetch $URL — scanner aborted"
-    exit 1
+if [[ -z "$HEADERS" ]]; then
+  echo "❌ Could not reach $URL — scan aborted."
+  exit 1
 fi
 
-# ── 3. Security Headers ───────────────────────────────────────────────────────
+BODY=$(fetch_body "$URL")
 
-check_header() {
-    local hname="$1"
-    local label="$2"
-    local level="$3"
-    local val
-    val=$(header_value "$HEADERS" "$hname")
-    if [[ -z "$val" ]]; then
-        case "$level" in
-            CRITICAL) FINDINGS_CRIT+=("Missing $label header") ;;
-            HIGH)     FINDINGS_HIGH+=("Missing $label header") ;;
-            MEDIUM)   FINDINGS_MED+=("Missing $label header") ;;
-            LOW)      FINDINGS_LOW+=("Missing $label header") ;;
-        esac
-    else
-        PASSED+=("$label header present")
-    fi
-}
-
-check_header "Content-Security-Policy"   "Content-Security-Policy (CSP)"        "HIGH"
-check_header "Strict-Transport-Security" "HTTP Strict-Transport-Security (HSTS)" "HIGH"
-check_header "X-Frame-Options"           "X-Frame-Options"                       "MEDIUM"
-check_header "X-Content-Type-Options"    "X-Content-Type-Options"                "LOW"
-check_header "Referrer-Policy"           "Referrer-Policy"                       "LOW"
-
-# ── 4. JS Library Version Detection ──────────────────────────────────────────
-
-detect_lib() {
-    local name="$1"
-    local pattern="$2"
-    local cve="$3"
-    local safe="$4"
-    local level="$5"
-    local ver
-    ver=$(echo "$HTML" | grep -oiE "$pattern" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-    if [[ -n "$ver" ]]; then
-        if [[ -n "$cve" ]]; then
-            case "$level" in
-                HIGH)   FINDINGS_HIGH+=("$name $ver detected — check against $cve (safe: v${safe}+)") ;;
-                MEDIUM) FINDINGS_MED+=("$name $ver detected — check against $cve (safe: v${safe}+)") ;;
-                LOW)    FINDINGS_LOW+=("$name $ver detected — check against $cve (safe: v${safe}+)") ;;
-            esac
-        else
-            PASSED+=("$name $ver detected (no known critical CVE flagged)")
-        fi
-    fi
-}
-
-detect_lib "jQuery"    'jquery[.-][0-9]+\.[0-9]+\.[0-9]+'    "CVE-2020-11022" "3.5.0"   "HIGH"
-detect_lib "Bootstrap" 'bootstrap[.-][0-9]+\.[0-9]+\.[0-9]+' "CVE-2019-8331"  "4.3.1"   "MEDIUM"
-detect_lib "lodash"    'lodash[.-][0-9]+\.[0-9]+\.[0-9]+'    "CVE-2021-23337" "4.17.21" "HIGH"
-detect_lib "Angular"   'angular[.-][0-9]+\.[0-9]+\.[0-9]+'   "CVE-2019-14863" "2.0.0"   "HIGH"
-detect_lib "React"     'react[.-][0-9]+\.[0-9]+\.[0-9]+'     ""               ""         "LOW"
-
-# ── 5. Exposed Sensitive Files ────────────────────────────────────────────────
-
-check_exposed() {
-    local path="$1"
-    local label="$2"
-    local test_url="${URL%/}${path}"
-    local status
-    status=$(curl -so /dev/null -w "%{http_code}" --max-time 8 "$test_url" 2>/dev/null || echo "0")
-    local body_size
-    body_size=$(curl -sL --max-time 8 "$test_url" 2>/dev/null | wc -c)
-    if [[ "$status" == "200" && "$body_size" -gt 10 ]]; then
-        FINDINGS_CRIT+=("$label publicly accessible at $test_url — may expose credentials/config")
-    fi
-}
-
-check_exposed "/.env"        ".env file"
-check_exposed "/.git/config" ".git/config"
-check_exposed "/.htaccess"   ".htaccess"
-check_exposed "/backup.zip"  "backup.zip"
-check_exposed "/config.php"  "config.php"
-
-# ── 6. Mixed Content ──────────────────────────────────────────────────────────
-
-if [[ "$URL" == https://* ]]; then
-    MIXED=$(echo "$HTML" | grep -oiE '(src|href|url)\s*=\s*['"'"'"]?http://[^\s'"'"'"<>]+' | head -5)
-    if [[ -n "$MIXED" ]]; then
-        COUNT=$(echo "$MIXED" | wc -l | tr -d ' ')
-        EXAMPLE=$(echo "$MIXED" | head -1 | sed 's/.*http:\/\//http:\/\//' | cut -c1-80)
-        FINDINGS_MED+=("Mixed content detected — $COUNT HTTP asset(s) on HTTPS page (e.g. $EXAMPLE)")
-    else
-        PASSED+=("No mixed content detected")
-    fi
+# ─── 3. Security Headers ─────────────────────────────────────────────────────
+CSP=$(get_header "$HEADERS" "content-security-policy")
+if [[ -z "$CSP" ]]; then
+  HIGH+=("Missing Content-Security-Policy header — XSS attacks are unrestricted")
+else
+  INFO+=("Content-Security-Policy header present")
 fi
 
-# ── 7. Build Report ───────────────────────────────────────────────────────────
+if [[ "$SCHEME" == "https" ]]; then
+  HSTS=$(get_header "$HEADERS" "strict-transport-security")
+  if [[ -z "$HSTS" ]]; then
+    HIGH+=("Missing Strict-Transport-Security (HSTS) — browsers may fall back to HTTP")
+  else
+    INFO+=("HSTS header present")
+  fi
+fi
 
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-ORANGE='\033[0;33m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+XFO=$(get_header "$HEADERS" "x-frame-options")
+if [[ -z "$XFO" ]]; then
+  MEDIUM+=("Missing X-Frame-Options header — site may be vulnerable to clickjacking")
+else
+  INFO+=("X-Frame-Options header present")
+fi
 
-print_section() {
-    local icon="$1"
-    local level="$2"
-    local color="$3"
-    shift 3
-    local items=("$@")
-    if [[ ${#items[@]} -gt 0 ]]; then
-        echo -e "${color}${icon} ${level} (${#items[@]})${NC}"
-        for item in "${items[@]}"; do
-            echo "  • $item"
-        done
-        echo ""
-    fi
-}
+XCTO=$(get_header "$HEADERS" "x-content-type-options")
+if [[ -z "$XCTO" ]]; then
+  LOW+=("Missing X-Content-Type-Options header — MIME-type sniffing possible")
+else
+  INFO+=("X-Content-Type-Options header present")
+fi
 
+RP=$(get_header "$HEADERS" "referrer-policy")
+if [[ -z "$RP" ]]; then
+  LOW+=("Missing Referrer-Policy header — referrer data may leak to third parties")
+else
+  INFO+=("Referrer-Policy header present")
+fi
+
+# Server header fingerprinting
+SERVER=$(get_header "$HEADERS" "server")
+if [[ -n "$SERVER" ]]; then
+  if echo "$SERVER" | grep -qE '[0-9]'; then
+    LOW+=("Server header exposes version info: '$SERVER' — aids fingerprinting")
+  else
+    INFO+=("Server header present (no version): $SERVER")
+  fi
+fi
+
+# X-Powered-By
+POWERED=$(get_header "$HEADERS" "x-powered-by")
+if [[ -n "$POWERED" ]]; then
+  LOW+=("X-Powered-By header exposes technology: '$POWERED'")
+fi
+
+# ─── 4. Outdated/Vulnerable JS Libraries ─────────────────────────────────────
+declare -A LIBS=(
+  ["jQuery"]='jquery[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
+  ["Angular"]='angular[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
+  ["React"]='react[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
+  ["Bootstrap"]='bootstrap[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
+  ["Lodash"]='lodash[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
+  ["Moment.js"]='moment[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
+)
+
+declare -A LIB_CVE=(
+  ["jQuery"]="1.x/2.x: CVE-2019-11358 (XSS), CVE-2020-11022"
+  ["Angular"]="<1.8: multiple XSS CVEs"
+  ["React"]="<16.9: CVE-2018-6341"
+  ["Bootstrap"]="<3.4.1: CVE-2019-8331 (XSS)"
+  ["Lodash"]="<4.17.21: CVE-2021-23337 (injection)"
+  ["Moment.js"]="<2.29.2: CVE-2022-24785 (path traversal)"
+)
+
+for lib in "${!LIBS[@]}"; do
+  VERSION=$(echo "$BODY" | grep -oiE "${LIBS[$lib]}" | grep -oE '[0-9]+\.[0-9]+\.?[0-9]*' | head -1 || true)
+  if [[ -n "$VERSION" ]]; then
+    HIGH+=("$lib $VERSION detected in page source — ${LIB_CVE[$lib]}")
+  fi
+done
+
+# ─── 5. Exposed Sensitive Files ───────────────────────────────────────────────
+declare -A SENSITIVE_FILES=(
+  ["/.env"]="critical|.env file accessible — may expose credentials and API keys"
+  ["/.git/config"]="critical|.git/config accessible — source code structure exposed"
+  ["/.htaccess"]="medium|.htaccess accessible — server config may be readable"
+  ["/backup.zip"]="high|backup.zip accessible — full site backup may be downloadable"
+  ["/backup.tar.gz"]="high|backup.tar.gz accessible"
+  ["/config.php"]="high|config.php accessible — database credentials may be exposed"
+  ["/wp-config.php"]="high|wp-config.php accessible — WordPress DB credentials exposed"
+  ["/.DS_Store"]="medium|.DS_Store accessible — directory structure revealed"
+  ["/phpinfo.php"]="high|phpinfo.php accessible — full PHP environment info exposed"
+  ["/server-status"]="medium|Apache server-status accessible — internal stats visible"
+)
+
+for path in "${!SENSITIVE_FILES[@]}"; do
+  IFS='|' read -r sev desc <<< "${SENSITIVE_FILES[$path]}"
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 \
+    --connect-timeout 4 "${BASE_URL}${path}" 2>/dev/null || echo "000")
+  if [[ "$STATUS" == "200" ]]; then
+    case "$sev" in
+      critical) CRITICAL+=("$desc at $path") ;;
+      high)     HIGH+=("$desc at $path") ;;
+      medium)   MEDIUM+=("$desc at $path") ;;
+    esac
+  fi
+done
+
+# ─── 6. Mixed Content ─────────────────────────────────────────────────────────
+if [[ "$SCHEME" == "https" && -n "$BODY" ]]; then
+  MIXED_COUNT=$(echo "$BODY" | grep -oE '(src|href)="http://[^"]+' | wc -l | tr -d ' ' || echo "0")
+  if [[ "$MIXED_COUNT" -gt 0 ]]; then
+    MEDIUM+=("Mixed content detected — $MIXED_COUNT HTTP asset(s) loaded on HTTPS page")
+  fi
+fi
+
+# ─── 7. Cookie Flags ──────────────────────────────────────────────────────────
+COOKIE=$(get_header "$HEADERS" "set-cookie")
+if [[ -n "$COOKIE" ]]; then
+  if ! echo "$COOKIE" | grep -qi "httponly"; then
+    MEDIUM+=("Session cookie missing HttpOnly flag — JavaScript can read cookies (XSS risk)")
+  fi
+  if [[ "$SCHEME" == "https" ]] && ! echo "$COOKIE" | grep -qi "secure"; then
+    MEDIUM+=("Session cookie missing Secure flag — cookie may be sent over HTTP")
+  fi
+  if ! echo "$COOKIE" | grep -qi "samesite"; then
+    LOW+=("Session cookie missing SameSite attribute — CSRF risk")
+  fi
+fi
+
+# ─── Build Report ──────────────────────────────────────────────────────────────
+echo ""
 echo "🔍 WebGuard Report — $HOST"
-echo "━━━━━━━━━━━━━━━━━━━"
+echo "$DIVIDER"
 echo ""
 
-HAS_FINDINGS=0
-[[ ${#FINDINGS_CRIT[@]} -gt 0 ]] && HAS_FINDINGS=1
-[[ ${#FINDINGS_HIGH[@]} -gt 0 ]] && HAS_FINDINGS=1
-[[ ${#FINDINGS_MED[@]} -gt 0 ]]  && HAS_FINDINGS=1
-[[ ${#FINDINGS_LOW[@]} -gt 0 ]]  && HAS_FINDINGS=1
-
-print_section "🔴" "CRITICAL" "$RED"    "${FINDINGS_CRIT[@]+"${FINDINGS_CRIT[@]}"}"
-print_section "🟠" "HIGH"     "$ORANGE" "${FINDINGS_HIGH[@]+"${FINDINGS_HIGH[@]}"}"
-print_section "🟡" "MEDIUM"   "$YELLOW" "${FINDINGS_MED[@]+"${FINDINGS_MED[@]}"}"
-print_section "🟢" "LOW"      "$GREEN"  "${FINDINGS_LOW[@]+"${FINDINGS_LOW[@]}"}"
-
-if [[ $HAS_FINDINGS -eq 0 ]]; then
-    echo -e "${GREEN}✅ No vulnerabilities found!${NC}"
-    echo ""
+if [[ ${#CRITICAL[@]} -gt 0 ]]; then
+  echo "🔴 CRITICAL (${#CRITICAL[@]})"
+  for i in "${CRITICAL[@]}"; do echo "  • $i"; done
+  echo ""
 fi
 
-if [[ ${#PASSED[@]} -gt 0 ]]; then
-    echo -e "${GREEN}✅ PASSED${NC}"
-    for p in "${PASSED[@]}"; do
-        echo -e "  • ${GREEN}$p${NC}"
-    done
-    echo ""
+if [[ ${#HIGH[@]} -gt 0 ]]; then
+  echo "🟠 HIGH (${#HIGH[@]})"
+  for i in "${HIGH[@]}"; do echo "  • $i"; done
+  echo ""
 fi
 
-# Top fixes
-ALL_FINDINGS=("${FINDINGS_CRIT[@]+"${FINDINGS_CRIT[@]}"}" \
-              "${FINDINGS_HIGH[@]+"${FINDINGS_HIGH[@]}"}" \
-              "${FINDINGS_MED[@]+"${FINDINGS_MED[@]}"}" \
-              "${FINDINGS_LOW[@]+"${FINDINGS_LOW[@]}"}")
-
-if [[ ${#ALL_FINDINGS[@]} -gt 0 ]]; then
-    echo "📋 Top Fix:"
-    for i in "${!ALL_FINDINGS[@]}"; do
-        [[ $i -ge 2 ]] && break
-        echo -e "${CYAN}→ ${ALL_FINDINGS[$i]}${NC}"
-    done
-    echo ""
+if [[ ${#MEDIUM[@]} -gt 0 ]]; then
+  echo "🟡 MEDIUM (${#MEDIUM[@]})"
+  for i in "${MEDIUM[@]}"; do echo "  • $i"; done
+  echo ""
 fi
 
-echo "━━━━━━━━━━━━━━━━━━━"
+if [[ ${#LOW[@]} -gt 0 ]]; then
+  echo "🟢 LOW (${#LOW[@]})"
+  for i in "${LOW[@]}"; do echo "  • $i"; done
+  echo ""
+fi
+
+if [[ ${#INFO[@]} -gt 0 ]]; then
+  echo "ℹ️  INFO (${#INFO[@]})"
+  for i in "${INFO[@]}"; do echo "  • $i"; done
+  echo ""
+fi
+
+if [[ ${#CRITICAL[@]} -eq 0 && ${#HIGH[@]} -eq 0 && ${#MEDIUM[@]} -eq 0 && ${#LOW[@]} -eq 0 ]]; then
+  echo "✅ No issues found — site looks clean!"
+  echo ""
+fi
+
+# Top Fixes
+TOP_FIXES=()
+for i in "${CRITICAL[@]}"; do
+  [[ "$i" =~ HTTP|http ]] && TOP_FIXES+=("Redirect all HTTP traffic to HTTPS in your server config") && break
+done
+for i in "${CRITICAL[@]}"; do
+  [[ "$i" =~ \.env ]] && TOP_FIXES+=("Block .env access in your web server config (deny from all)") && break
+done
+for i in "${CRITICAL[@]}"; do
+  [[ "$i" =~ \.git ]] && TOP_FIXES+=("Block .git directory access from the public web server") && break
+done
+for i in "${HIGH[@]}"; do
+  [[ "$i" =~ CSP|Content-Security ]] && TOP_FIXES+=("Add CSP header: Content-Security-Policy: default-src 'self'") && break
+done
+for i in "${HIGH[@]}"; do
+  [[ "$i" =~ HSTS|Strict-Transport ]] && TOP_FIXES+=("Add HSTS: Strict-Transport-Security: max-age=31536000; includeSubDomains") && break
+done
+for i in "${HIGH[@]}"; do
+  [[ "$i" =~ jQuery|Angular|Bootstrap|Lodash|React|Moment ]] && TOP_FIXES+=("Update all JS libraries to their latest stable versions") && break
+done
+
+if [[ ${#TOP_FIXES[@]} -gt 0 ]]; then
+  echo "📋 Top Fix:"
+  COUNT=0
+  for fix in "${TOP_FIXES[@]}"; do
+    echo "→ $fix"
+    COUNT=$((COUNT+1))
+    [[ $COUNT -ge 3 ]] && break
+  done
+  echo ""
+fi
+
+echo "$DIVIDER"
 echo "by cybersecurity experts | WebGuard v1.0"
+echo ""
