@@ -2,174 +2,165 @@
 
 **Find vulnerabilities before attackers do.**
 
-> A two-mode security scanner for OpenClaw agents. Scan any live URL for frontend vulnerabilities, or audit a local codebase for secrets, dangerous patterns, and dependency CVEs.
-
-**Version:** 1.0  
-**Categories:** 🔒 Security · 🛠️ Dev Tools  
-**Platform:** Windows (PowerShell) + Mac/Linux (Bash)  
-**Author:** by @drizzy8423
+WebGuard is a two-mode security scanner for OpenClaw agents. Point it at a URL or a local code folder — it returns a clear, prioritized report of security issues with actionable fixes.
 
 ---
 
-## What It Does
+## 🔍 What It Does
 
-### 🌐 Mode 1 — URL Scanner
-
-Point WebGuard at any URL and it checks:
-
-| Check | What It Catches |
-|---|---|
-| **SSL/HTTPS** | Missing HTTPS, no HTTP→HTTPS redirect |
-| **Security Headers** | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy |
-| **JS Library CVEs** | jQuery, Bootstrap, lodash, Angular, React version detection |
-| **Exposed Files** | `.env`, `.git/config`, `.htaccess`, `backup.zip`, `config.php` |
-| **Mixed Content** | HTTP assets on HTTPS pages |
-
-### 🗂️ Mode 2 — Code Scanner
-
-Point WebGuard at a local folder and it checks:
-
-| Check | What It Catches |
-|---|---|
-| **Hardcoded Secrets** | OpenAI keys, AWS keys, GitHub tokens, passwords, API keys, Bearer tokens |
-| **Dangerous Functions** | `eval()`, `exec()`, `innerHTML=`, `dangerouslySetInnerHTML`, `system()` |
-| **SQL Injection** | String concatenation in queries, f-string SQL, `.format()` in SQL |
-| **npm audit** | Runs `npm audit` if `package.json` is found |
-| **pip audit** | Runs `pip-audit` if `requirements.txt` is found |
+| Mode | Input | What It Checks |
+|------|-------|----------------|
+| **URL Scanner** | Any public URL | Security headers, outdated JS libs, exposed files, HTTPS enforcement, mixed content, cookie flags |
+| **Code Scanner** | Local folder path | Hardcoded secrets, dangerous functions, SQL injection patterns, npm/pip dependency audits |
 
 ---
 
-## Output
+## ⚡ Quick Start
 
-Every scan produces a severity-graded report:
+### Scan a URL
+```bash
+# Mac/Linux
+./scan-url.sh https://example.com
+
+# Windows
+.\scan-url.ps1 https://example.com
+```
+
+### Scan a code folder
+```bash
+# Mac/Linux
+./scan-code.sh /path/to/your/project
+
+# Windows
+.\scan-code.ps1 C:\Projects\myapp
+```
+
+---
+
+## 📊 Sample Output
 
 ```
 🔍 WebGuard Report — example.com
-━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🔴 CRITICAL (1)
   • No HTTPS enforced — traffic can be intercepted
 
 🟠 HIGH (2)
-  • Missing Content-Security-Policy header
-  • jQuery 1.9.1 detected — CVE-2019-11358 (XSS)
+  • Missing Content-Security-Policy header — XSS attacks are unrestricted
+  • jQuery 1.9.1 detected in page source — 1.x/2.x: CVE-2019-11358 (XSS), CVE-2020-11022
 
 🟡 MEDIUM (1)
-  • .env file accessible at /.env — may expose credentials
+  • .env file accessible — may expose credentials and API keys at /.env
 
 🟢 LOW (1)
-  • Missing Referrer-Policy header
-
-✅ PASSED
-  • X-Content-Type-Options header present
+  • Missing Referrer-Policy header — referrer data may leak to third parties
 
 📋 Top Fix:
-→ Redirect all HTTP to HTTPS in your server config
+→ Redirect all HTTP traffic to HTTPS in your server config
 → Add CSP header: Content-Security-Policy: default-src 'self'
+→ Update JS libraries to their latest stable versions
 
-━━━━━━━━━━━━━━━━━━━
-by @drizzy8423 | WebGuard v1.0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+by cybersecurity experts | WebGuard v1.0
 ```
 
 ---
 
-## Installation (OpenClaw)
+## 🔴 Mode 1: URL Scanner
 
-Clone or copy this skill into your OpenClaw workspace:
+**Checks performed:**
 
-```
-skills/
-  webguard/
-    SKILL.md
-    scan-url.ps1
-    scan-url.sh
-    scan-code.ps1
-    scan-code.sh
-    README.md
-```
-
-The agent will automatically use `SKILL.md` to know how to invoke the scanners.
+- ✅ **SSL/HTTPS enforcement** — detects HTTP-only sites and missing redirects
+- ✅ **Security headers** — CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- ✅ **Outdated JS libraries** — jQuery, React, Angular, Bootstrap, Lodash, Moment.js with CVE refs
+- ✅ **Exposed sensitive files** — `.env`, `.git/config`, `wp-config.php`, `phpinfo.php`, backups
+- ✅ **Mixed content** — HTTP assets on HTTPS pages
+- ✅ **Cookie security flags** — HttpOnly, Secure, SameSite
+- ✅ **Server fingerprinting** — version disclosure via Server/X-Powered-By headers
 
 ---
 
-## Usage
+## 🔴 Mode 2: Code Scanner
 
-### URL Scan
+**Checks performed:**
 
-**Windows (PowerShell):**
-```powershell
-.\scan-url.ps1 -Url "https://example.com"
-```
+- ✅ **Hardcoded secrets** — OpenAI keys (`sk-`), AWS keys (`AKIA`), GitHub tokens (`ghp_`), Slack tokens, Google API keys, passwords, API keys, private keys
+- ✅ **Dangerous functions** — `eval()`, `exec()`, `system()`, `innerHTML=`, `dangerouslySetInnerHTML`, `shell_exec()`, `subprocess(shell=True)`
+- ✅ **SQL injection** — string concatenation in queries, unsanitized user input in DB calls
+- ✅ **npm audit** — runs automatically if `package.json` is present
+- ✅ **pip-audit** — runs automatically if `requirements.txt` is present
 
-**Mac/Linux (Bash):**
-```bash
-bash scan-url.sh https://example.com
-```
+**File types scanned:** `.js` `.ts` `.py` `.php` `.rb` `.env` `.yaml` `.yml`
 
-### Code Scan
-
-**Windows (PowerShell):**
-```powershell
-.\scan-code.ps1 -Path "C:\Projects\myapp"
-```
-
-**Mac/Linux (Bash):**
-```bash
-bash scan-code.sh /home/user/myapp
-```
-
-### Via OpenClaw Agent
-
-Just tell your agent:
-- `"Scan https://mysite.com for security vulnerabilities"`
-- `"Check my code at C:\Projects\app for secrets and SQLi"`
-
-The agent reads `SKILL.md`, picks the right mode, runs the scanner, and presents the formatted report.
+**Excluded from scan:** `node_modules`, `.git`, `vendor`, `dist`, `build`, `__pycache__`
 
 ---
 
-## Files
+## 🎯 Severity Levels
 
-| File | Purpose |
-|---|---|
-| `SKILL.md` | Agent instructions — how to use both modes |
-| `scan-url.ps1` | PowerShell URL scanner (Windows) |
-| `scan-url.sh` | Bash URL scanner (Mac/Linux) |
-| `scan-code.ps1` | PowerShell code scanner (Windows) |
-| `scan-code.sh` | Bash code scanner (Mac/Linux) |
+| Level | Emoji | Meaning |
+|-------|-------|---------|
+| CRITICAL | 🔴 | Active exploitation risk — fix immediately |
+| HIGH | 🟠 | Significant vulnerability — fix ASAP |
+| MEDIUM | 🟡 | Moderate risk — plan to fix |
+| LOW | 🟢 | Best-practice gap — fix when possible |
+| INFO | ℹ️ | Observation — no action needed |
+
+---
+
+## 🤖 Agent Integration (OpenClaw)
+
+Add WebGuard to your agent by including `SKILL.md` in your agent's skill set. The agent will:
+
+1. Detect whether the user provided a URL or a folder path
+2. Run the appropriate scanner script for the platform (Windows/Mac/Linux)
+3. Format results using the severity report structure
+4. Provide prioritized fix recommendations
+
+**Example prompts that trigger WebGuard:**
+- `"scan https://myapp.com"`
+- `"check https://example.com for vulnerabilities"`
+- `"scan code in /home/user/project"`
+- `"audit C:\Projects\backend"`
+
+---
+
+## 📦 Files
+
+| File | Description |
+|------|-------------|
+| `SKILL.md` | Agent instructions for both scan modes |
+| `scan-url.ps1` | URL scanner — Windows PowerShell |
+| `scan-url.sh` | URL scanner — Mac/Linux bash |
+| `scan-code.ps1` | Code scanner — Windows PowerShell |
+| `scan-code.sh` | Code scanner — Mac/Linux bash |
 | `README.md` | This file |
 
 ---
 
-## Requirements
+## ⚙️ Requirements
 
-### URL Scanner
-- `curl` (Mac/Linux) or `Invoke-WebRequest` (Windows — built-in)
-- No additional packages required
+**URL Scanner:**
+- `curl` (Mac/Linux) or `Invoke-WebRequest` (Windows) — pre-installed on most systems
+- `openssl` for SSL certificate check (optional, Mac/Linux only)
 
-### Code Scanner  
-- PowerShell 5.1+ (Windows) or Bash 4+ (Mac/Linux)
-- `npm` — for npm audit (optional, auto-detected)
-- `pip-audit` — for Python dependency audit (optional, install via `pip install pip-audit`)
-- `python3` — used in the Bash scanner for JSON parsing of audit results
+**Code Scanner:**
+- `npm` — for dependency audit (optional)
+- `pip-audit` — for Python dependency audit (`pip install pip-audit`, optional)
 
 ---
 
-## Privacy
+## 🏷️ Categories
 
-WebGuard **never** stores, logs, or sends the content of scanned files or URLs anywhere. It reads locally, reports locally. Credential matches are reported by file path and line number only — the actual secret value is not echoed.
-
----
-
-## Severity Reference
-
-| Level | Icon | When Applied |
-|---|---|---|
-| Critical | 🔴 | Data exposure, accessible secrets, no HTTPS |
-| High | 🟠 | Missing CSP/HSTS, known CVE libraries, dangerous functions, SQLi |
-| Medium | 🟡 | Missing X-Frame-Options, mixed content, moderate vulns |
-| Low | 🟢 | Missing minor headers, low-severity deps |
+`Security` · `Dev Tools` · `Code Quality` · `Auditing`
 
 ---
 
-*WebGuard v1.0 — by @drizzy8423*
+## 📄 License
+
+MIT — free to use, modify, and distribute.
+
+---
+
+*WebGuard v1.0 — by cybersecurity experts*
