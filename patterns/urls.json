@@ -1,0 +1,22 @@
+{
+  "libraries": [
+    {"name":"jQuery","r":"jquery[.-]([0-9]+\\.[0-9]+\\.?[0-9]*)(\\.min)?\\.js","cve":"1.x/2.x: CVE-2019-11358 (XSS), CVE-2020-11022"},
+    {"name":"Angular","r":"angular[.-]([0-9]+\\.[0-9]+\\.?[0-9]*)(\\.min)?\\.js","cve":"<1.8: multiple XSS CVEs"},
+    {"name":"React","r":"react[.-]([0-9]+\\.[0-9]+\\.?[0-9]*)(\\.min)?\\.js","cve":"<16.9: CVE-2018-6341"},
+    {"name":"Bootstrap","r":"bootstrap[.-]([0-9]+\\.[0-9]+\\.?[0-9]*)(\\.min)?\\.(js|css)","cve":"<3.4.1: CVE-2019-8331 (XSS)"},
+    {"name":"Lodash","r":"lodash[.-]([0-9]+\\.[0-9]+\\.?[0-9]*)(\\.min)?\\.js","cve":"<4.17.21: CVE-2021-23337 (injection)"},
+    {"name":"Moment.js","r":"moment[.-]([0-9]+\\.[0-9]+\\.?[0-9]*)(\\.min)?\\.js","cve":"<2.29.2: CVE-2022-24785 (path traversal)"}
+  ],
+  "sensitive_files": [
+    {"path":"/.env","s":"critical","d":".env file accessible — may expose credentials and API keys"},
+    {"path":"/.git/config","s":"critical","d":".git/config accessible — source code structure exposed"},
+    {"path":"/.htaccess","s":"medium","d":".htaccess accessible — server config may be readable"},
+    {"path":"/backup.zip","s":"high","d":"backup.zip accessible — full site backup may be downloadable"},
+    {"path":"/backup.tar.gz","s":"high","d":"backup.tar.gz accessible"},
+    {"path":"/config.php","s":"high","d":"config.php accessible — database credentials may be exposed"},
+    {"path":"/wp-config.php","s":"high","d":"wp-config.php accessible — WordPress DB credentials exposed"},
+    {"path":"/.DS_Store","s":"medium","d":".DS_Store accessible — directory structure revealed (macOS artifact)"},
+    {"path":"/phpinfo.php","s":"high","d":"phpinfo.php accessible — full PHP environment info exposed"},
+    {"path":"/server-status","s":"medium","d":"Apache server-status accessible — internal stats visible"}
+  ]
+}

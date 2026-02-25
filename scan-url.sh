@@ -11,6 +11,8 @@ if [[ -z "$URL" ]]; then
   exit 1
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Strip trailing slash
 URL="${URL%/}"
 # Default to https if no scheme
@@ -59,11 +61,13 @@ get_header() {
   echo "$headers" | grep -i "^${name}:" | head -1 | sed 's/^[^:]*: //' | tr -d '\r' || true
 }
 
+# ─── Load patterns from JSON ─────────────────────────────────────────────────
+PATTERNS_FILE="$SCRIPT_DIR/patterns/urls.json"
+
 # ─── 1. SSL / HTTPS Check ────────────────────────────────────────────────────
 if [[ "$SCHEME" != "https" ]]; then
   CRITICAL+=("Site uses HTTP — all traffic is unencrypted and can be intercepted")
 else
-  # Check if HTTP redirects to HTTPS
   HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 \
     --connect-timeout 5 --max-redirs 0 "$HTTP_BASE" 2>/dev/null || echo "000")
   if [[ "$HTTP_STATUS" == "200" ]]; then
@@ -74,7 +78,6 @@ else
     INFO+=("HTTPS detected — encrypted connection")
   fi
 
-  # SSL certificate check
   SSL_CHECK=$(echo | openssl s_client -connect "${HOST}:443" \
     -servername "$HOST" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null || true)
   if [[ -z "$SSL_CHECK" ]]; then
@@ -132,7 +135,6 @@ else
   INFO+=("Referrer-Policy header present")
 fi
 
-# Server header fingerprinting
 SERVER=$(get_header "$HEADERS" "server")
 if [[ -n "$SERVER" ]]; then
   if echo "$SERVER" | grep -qE '[0-9]'; then
@@ -142,64 +144,47 @@ if [[ -n "$SERVER" ]]; then
   fi
 fi
 
-# X-Powered-By
 POWERED=$(get_header "$HEADERS" "x-powered-by")
 if [[ -n "$POWERED" ]]; then
   LOW+=("X-Powered-By header exposes technology: '$POWERED'")
 fi
 
-# ─── 4. Outdated/Vulnerable JS Libraries ─────────────────────────────────────
-declare -A LIBS=(
-  ["jQuery"]='jquery[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
-  ["Angular"]='angular[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
-  ["React"]='react[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
-  ["Bootstrap"]='bootstrap[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
-  ["Lodash"]='lodash[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
-  ["Moment.js"]='moment[.-]([0-9]+\.[0-9]+\.?[0-9]*)(\.min)?\.js'
-)
+# ─── 4. Outdated/Vulnerable JS Libraries (from patterns file) ────────────────
+if command -v python3 &>/dev/null && [[ -f "$PATTERNS_FILE" ]]; then
+  while IFS='|' read -r lib_name lib_regex lib_cve; do
+    [[ -z "$lib_regex" ]] && continue
+    VERSION=$(echo "$BODY" | grep -oiE "$lib_regex" | grep -oE '[0-9]+\.[0-9]+\.?[0-9]*' | head -1 || true)
+    if [[ -n "$VERSION" ]]; then
+      HIGH+=("$lib_name $VERSION detected in page source — $lib_cve")
+    fi
+  done < <(python3 -c "
+import json
+data = json.load(open('$PATTERNS_FILE'))
+for lib in data.get('libraries', []):
+    print(f\"{lib['name']}|{lib['r']}|{lib['cve']}\")
+")
+fi
 
-declare -A LIB_CVE=(
-  ["jQuery"]="1.x/2.x: CVE-2019-11358 (XSS), CVE-2020-11022"
-  ["Angular"]="<1.8: multiple XSS CVEs"
-  ["React"]="<16.9: CVE-2018-6341"
-  ["Bootstrap"]="<3.4.1: CVE-2019-8331 (XSS)"
-  ["Lodash"]="<4.17.21: CVE-2021-23337 (injection)"
-  ["Moment.js"]="<2.29.2: CVE-2022-24785 (path traversal)"
-)
-
-for lib in "${!LIBS[@]}"; do
-  VERSION=$(echo "$BODY" | grep -oiE "${LIBS[$lib]}" | grep -oE '[0-9]+\.[0-9]+\.?[0-9]*' | head -1 || true)
-  if [[ -n "$VERSION" ]]; then
-    HIGH+=("$lib $VERSION detected in page source — ${LIB_CVE[$lib]}")
-  fi
-done
-
-# ─── 5. Exposed Sensitive Files ───────────────────────────────────────────────
-declare -A SENSITIVE_FILES=(
-  ["/.env"]="critical|.env file accessible — may expose credentials and API keys"
-  ["/.git/config"]="critical|.git/config accessible — source code structure exposed"
-  ["/.htaccess"]="medium|.htaccess accessible — server config may be readable"
-  ["/backup.zip"]="high|backup.zip accessible — full site backup may be downloadable"
-  ["/backup.tar.gz"]="high|backup.tar.gz accessible"
-  ["/config.php"]="high|config.php accessible — database credentials may be exposed"
-  ["/wp-config.php"]="high|wp-config.php accessible — WordPress DB credentials exposed"
-  ["/.DS_Store"]="medium|.DS_Store accessible — directory structure revealed"
-  ["/phpinfo.php"]="high|phpinfo.php accessible — full PHP environment info exposed"
-  ["/server-status"]="medium|Apache server-status accessible — internal stats visible"
-)
-
-for path in "${!SENSITIVE_FILES[@]}"; do
-  IFS='|' read -r sev desc <<< "${SENSITIVE_FILES[$path]}"
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 \
-    --connect-timeout 4 "${BASE_URL}${path}" 2>/dev/null || echo "000")
-  if [[ "$STATUS" == "200" ]]; then
-    case "$sev" in
-      critical) CRITICAL+=("$desc at $path") ;;
-      high)     HIGH+=("$desc at $path") ;;
-      medium)   MEDIUM+=("$desc at $path") ;;
-    esac
-  fi
-done
+# ─── 5. Exposed Sensitive Files (from patterns file) ─────────────────────────
+if command -v python3 &>/dev/null && [[ -f "$PATTERNS_FILE" ]]; then
+  while IFS='|' read -r fpath fsev fdesc; do
+    [[ -z "$fpath" ]] && continue
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 \
+      --connect-timeout 4 "${BASE_URL}${fpath}" 2>/dev/null || echo "000")
+    if [[ "$STATUS" == "200" ]]; then
+      case "$fsev" in
+        critical) CRITICAL+=("$fdesc at $fpath") ;;
+        high)     HIGH+=("$fdesc at $fpath") ;;
+        medium)   MEDIUM+=("$fdesc at $fpath") ;;
+      esac
+    fi
+  done < <(python3 -c "
+import json
+data = json.load(open('$PATTERNS_FILE'))
+for f in data.get('sensitive_files', []):
+    print(f\"{f['path']}|{f['s']}|{f['d']}\")
+")
+fi
 
 # ─── 6. Mixed Content ─────────────────────────────────────────────────────────
 if [[ "$SCHEME" == "https" && -n "$BODY" ]]; then
@@ -267,31 +252,19 @@ fi
 # Top Fixes
 TOP_FIXES=()
 for i in "${CRITICAL[@]}"; do
-  [[ "$i" =~ HTTP|http ]] && TOP_FIXES+=("Redirect all HTTP traffic to HTTPS in your server config") && break
-done
-for i in "${CRITICAL[@]}"; do
-  [[ "$i" =~ \.env ]] && TOP_FIXES+=("Block .env access in your web server config (deny from all)") && break
-done
-for i in "${CRITICAL[@]}"; do
-  [[ "$i" =~ \.git ]] && TOP_FIXES+=("Block .git directory access from the public web server") && break
+  [[ "$i" =~ HTTP|http ]] && TOP_FIXES+=("Redirect all HTTP traffic to HTTPS") && break
 done
 for i in "${HIGH[@]}"; do
-  [[ "$i" =~ CSP|Content-Security ]] && TOP_FIXES+=("Add CSP header: Content-Security-Policy: default-src 'self'") && break
+  [[ "$i" =~ Content-Security-Policy ]] && TOP_FIXES+=("Add CSP header: Content-Security-Policy: default-src 'self'") && break
 done
 for i in "${HIGH[@]}"; do
-  [[ "$i" =~ HSTS|Strict-Transport ]] && TOP_FIXES+=("Add HSTS: Strict-Transport-Security: max-age=31536000; includeSubDomains") && break
-done
-for i in "${HIGH[@]}"; do
-  [[ "$i" =~ jQuery|Angular|Bootstrap|Lodash|React|Moment ]] && TOP_FIXES+=("Update all JS libraries to their latest stable versions") && break
+  [[ "$i" =~ "detected in page" ]] && TOP_FIXES+=("Update JS libraries to latest stable versions") && break
 done
 
 if [[ ${#TOP_FIXES[@]} -gt 0 ]]; then
   echo "📋 Top Fix:"
-  COUNT=0
   for fix in "${TOP_FIXES[@]}"; do
     echo "→ $fix"
-    COUNT=$((COUNT+1))
-    [[ $COUNT -ge 3 ]] && break
   done
   echo ""
 fi

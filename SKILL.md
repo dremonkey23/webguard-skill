@@ -114,6 +114,25 @@ by cybersecurity experts | WebGuard v1.0
 
 ---
 
+## File Structure
+
+```
+webguard-skill/
+├── SKILL.md              # This file
+├── README.md             # GitHub readme
+├── scan-url.ps1          # URL scanner (Windows)
+├── scan-url.sh           # URL scanner (Mac/Linux)
+├── scan-code.ps1         # Code scanner (Windows)
+├── scan-code.sh          # Code scanner (Mac/Linux)
+└── patterns/             # Detection patterns (JSON data files)
+    ├── secrets.json      # Secret/credential patterns
+    ├── dangerous.json    # Dangerous function patterns
+    ├── sql.json          # SQL injection patterns
+    └── urls.json         # JS library + sensitive file patterns
+```
+
+Scripts load detection patterns from the `patterns/` directory at runtime. This keeps pattern data separate from executable logic.
+
 ## Dependencies
 
 | Tool | Required For | Notes |
