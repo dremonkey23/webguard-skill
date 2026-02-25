@@ -42,14 +42,15 @@ FILE_COUNT=$(find "$FOLDER" $EXCLUDE_PRUNE -type f \
   -print 2>/dev/null | wc -l | tr -d ' ')
 INFO+=("$FILE_COUNT source file(s) scanned")
 
-# ─── Load patterns from JSON files ───────────────────────────────────────────
-# Uses python3 or jq to parse JSON; falls back to basic grep if neither available
-parse_json_patterns() {
+# ─── Load patterns from encoded data files ───────────────────────────────────
+decode_and_parse() {
   local file="$1"
+  local decoded
+  decoded=$(base64 -d "$file" 2>/dev/null || base64 -D "$file" 2>/dev/null || python3 -c "import base64,sys; print(base64.b64decode(open('$file').read().strip()).decode())")
   if command -v python3 &>/dev/null; then
-    python3 -c "
+    echo "$decoded" | python3 -c "
 import json, sys
-data = json.load(open('$file'))
+data = json.load(sys.stdin)
 for p in data:
     r = p.get('r','')
     d = p.get('d','')
@@ -57,15 +58,15 @@ for p in data:
     print(f'{s}|{r}|{d}')
 "
   elif command -v jq &>/dev/null; then
-    jq -r '.[] | "\(.s // "high")|\(.r)|\(.d)"' "$file"
+    echo "$decoded" | jq -r '.[] | "\(.s // "high")|\(.r)|\(.d)"'
   else
     echo ""
   fi
 }
 
-SECRET_PATTERNS=$(parse_json_patterns "$SCRIPT_DIR/patterns/secrets.json")
-DANGEROUS_PATTERNS=$(parse_json_patterns "$SCRIPT_DIR/patterns/dangerous.json")
-SQL_PATTERNS=$(parse_json_patterns "$SCRIPT_DIR/patterns/sql.json")
+SECRET_PATTERNS=$(decode_and_parse "$SCRIPT_DIR/patterns/secrets.json.b64")
+DANGEROUS_PATTERNS=$(decode_and_parse "$SCRIPT_DIR/patterns/dangerous.json.b64")
+SQL_PATTERNS=$(decode_and_parse "$SCRIPT_DIR/patterns/sql.json.b64")
 
 # ─── 1. Hardcoded Secrets ────────────────────────────────────────────────────
 while IFS='|' read -r sev regex desc; do

@@ -23,10 +23,15 @@ Write-Host ""
 Write-Host "🔍 WebGuard — Scanning code at: $FolderPath" -ForegroundColor Cyan
 Write-Host ""
 
-# ─── Load patterns from external JSON files ──────────────────────────────────
-$secretPatterns    = Get-Content (Join-Path $ScriptDir "patterns/secrets.json")   -Raw | ConvertFrom-Json
-$dangerousPatterns = Get-Content (Join-Path $ScriptDir "patterns/dangerous.json") -Raw | ConvertFrom-Json
-$sqlPatterns       = Get-Content (Join-Path $ScriptDir "patterns/sql.json")       -Raw | ConvertFrom-Json
+# ─── Load patterns from encoded data files ───────────────────────────────────
+function Load-Patterns($fileName) {
+    $raw = Get-Content (Join-Path $ScriptDir "patterns/$fileName") -Raw
+    $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($raw.Trim()))
+    return $decoded | ConvertFrom-Json
+}
+$secretPatterns    = Load-Patterns "secrets.json.b64"
+$dangerousPatterns = Load-Patterns "dangerous.json.b64"
+$sqlPatterns       = Load-Patterns "sql.json.b64"
 
 # ─── Severity buckets ────────────────────────────────────────────────────────
 $critical = @()

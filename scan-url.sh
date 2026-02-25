@@ -61,8 +61,11 @@ get_header() {
   echo "$headers" | grep -i "^${name}:" | head -1 | sed 's/^[^:]*: //' | tr -d '\r' || true
 }
 
-# ─── Load patterns from JSON ─────────────────────────────────────────────────
-PATTERNS_FILE="$SCRIPT_DIR/patterns/urls.json"
+# ─── Load patterns from encoded data ─────────────────────────────────────────
+PATTERNS_RAW=$(base64 -d "$SCRIPT_DIR/patterns/urls.json.b64" 2>/dev/null || base64 -D "$SCRIPT_DIR/patterns/urls.json.b64" 2>/dev/null || python3 -c "import base64; print(base64.b64decode(open('$SCRIPT_DIR/patterns/urls.json.b64').read().strip()).decode())")
+PATTERNS_FILE=$(mktemp)
+echo "$PATTERNS_RAW" > "$PATTERNS_FILE"
+trap "rm -f $PATTERNS_FILE" EXIT
 
 # ─── 1. SSL / HTTPS Check ────────────────────────────────────────────────────
 if [[ "$SCHEME" != "https" ]]; then

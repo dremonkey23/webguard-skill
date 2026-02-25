@@ -10,8 +10,13 @@ param(
 $ErrorActionPreference = "SilentlyContinue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# ─── Load patterns from external JSON files ──────────────────────────────────
-$urlPatterns = Get-Content (Join-Path $ScriptDir "patterns/urls.json") -Raw | ConvertFrom-Json
+# ─── Load patterns from encoded data files ───────────────────────────────────
+function Load-Patterns($fileName) {
+    $raw = Get-Content (Join-Path $ScriptDir "patterns/$fileName") -Raw
+    $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($raw.Trim()))
+    return $decoded | ConvertFrom-Json
+}
+$urlPatterns = Load-Patterns "urls.json.b64"
 
 # ─── Severity buckets ───────────────────────────────────────────────────────
 $critical = @()

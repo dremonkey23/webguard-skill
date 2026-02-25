@@ -1,7 +1,0 @@
-[
-  {"r":"(?i)(SELECT|INSERT|UPDATE|DELETE|DROP).*\\+\\s*[\\$\\w]","d":"SQL query with string concatenation — injection risk"},
-  {"r":"(?i)(SELECT|INSERT|UPDATE|DELETE).*\\bWHERE\\b.*\\+","d":"SQL WHERE clause with concatenation — injection risk"},
-  {"r":"(?i)query\\s*\\(.*\\+\\s*[\\$\\w]","d":"DB query() with concatenated variable — injection risk"},
-  {"r":"(?i)execute\\s*\\(\\s*[\"'].*\\+","d":"DB execute() with string concatenation — injection risk"},
-  {"r":"(?i)\\$_(GET|POST|REQUEST|COOKIE)\\[.*\\].*sql","d":"User input directly used in SQL context (PHP) — injection risk"}
-]
